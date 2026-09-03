@@ -1,0 +1,51 @@
+{
+  "name": "Simple Shop",
+  "description": "Simple shop. Register items and record sales.",
+  "kinds": {
+    "item": {
+      "description": "Register a new item for sale.",
+      "values": {
+        "name": {
+          "type": "string",
+          "optional": false,
+          "description": "Item display name."
+        },
+        "price": {
+          "type": "integer",
+          "optional": false,
+          "description": "Item price in cents (u32)."
+        }
+      }
+    },
+    "sale": {
+      "description": "Record a sale of one or more items.",
+      "values": {
+        "item": {
+          "type": "array",
+          "optional": false,
+          "description": "Items in this sale.",
+          "items": {
+            "type": "object",
+            "fields": {
+              "id": {
+                "type": "integer",
+                "optional": false,
+                "description": "Reference to registered item ID."
+              },
+              "quantity": {
+                "type": "integer",
+                "optional": true,
+                "description": "Quantity sold."
+              }
+            }
+          }
+        },
+        "actual_paid": {
+          "type": "integer",
+          "optional": false,
+          "description": "Total amount actually paid (u32). Discount computed from sum of item prices minus this."
+        }
+      }
+    }
+  }
+}

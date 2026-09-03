@@ -1,0 +1,90 @@
+import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+import { Card } from "../components/card.slint";
+
+export component Config inherits VerticalLayout {
+    in property <string> node_id;
+    in-out property <string> peer_connect_input;
+    in property <[string]> connected_peers;
+    in property <string> data_dir;
+    callback connect_peer();
+
+    spacing: 14px;
+    Card {
+        title: "Data Directory";
+        VerticalLayout {
+            spacing: 8px;
+
+            LineEdit {
+                text: root.data_dir;
+                read-only: true;
+                font-size: 12px;
+            }
+        }
+    }
+
+    Card {
+        title: "My Node ID";
+        VerticalLayout {
+            spacing: 8px;
+            LineEdit {
+                text: root.node_id;
+                read-only: true;
+                font-size: 11px;
+            }
+        }
+    }
+
+    Card {
+        title: "Connect to Peer";
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                LineEdit {
+                    text <=> root.peer_connect_input;
+                    placeholder-text: "Peer NodeId";
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: "Connect";
+                    clicked => {
+                        root.connect_peer();
+                    }
+                }
+            }
+        }
+    }
+
+    Card {
+        title: "Connected Peers";
+        VerticalLayout {
+            spacing: 8px;
+            ScrollView {
+                height: 200px;
+                VerticalLayout {
+                    spacing: 4px;
+                    for peer[i] in root.connected_peers: Rectangle {
+                        background: #f7f3ee;
+                        border-width: 1px;
+                        border-color: #d6cfc4;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            padding: 6px;
+                            Text {
+                                text: peer;
+                                font-size: 12px;
+                                color: #5a554f;
+                            }
+                        }
+                    }
+                    if (root.connected_peers.length == 0): Text {
+                        text: "No peers connected";
+                        color: #8a8580;
+                        font-size: 12px;
+                    }
+                }
+            }
+        }
+    }
+}

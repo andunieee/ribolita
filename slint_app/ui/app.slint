@@ -1,0 +1,105 @@
+import {
+    Button,
+    ComboBox,
+    LineEdit,
+    ScrollView,
+    TextEdit,
+} from "std-widgets.slint";
+import { StateViewer } from "views/state_viewer.slint";
+import { NewEntry } from "views/new_entry.slint";
+import { Entries } from "views/entries.slint";
+import { Config } from "views/config.slint";
+import { Entry } from "components/entry_edit.slint";
+
+export component AppWindow inherits Window {
+    min-width: 360px;
+    min-height: 560px;
+    title: root.app_title;
+    default-font-family: "Noto Sans";
+
+    in-out property <string> app_title;
+
+    property <int> active_tab;
+
+    in property <string> state_json;
+    in property <string> state_error;
+
+    in property <[string]> kind_names;
+
+    in property <[Entry]> entries;
+    in property <string> entries_error;
+
+    in property <string> data_dir;
+    in property <string> node_id;
+    in property <string> peer_connect_input;
+    in property <[string]> connected_peers;
+
+    callback refresh_state();
+    callback connect_peer();
+    callback save_entry();
+
+    Rectangle {
+        background: @linear-gradient(180deg, #f7f3ee 0%, #ebe5dd 100%);
+        VerticalLayout {
+            padding: 8px;
+            spacing: 16px;
+
+            Rectangle {
+                background: #fefcf9;
+                border-width: 1px;
+                border-color: #d6cfc4;
+                border-radius: 12px;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 10px;
+                    for tab[i] in ["State", "New Entry", "Entries", "Config"]: Rectangle {
+                        horizontal-stretch: 1;
+                        background: root.active_tab == i ? #e0d6c8 : transparent;
+                        border-radius: 8px;
+                        Text {
+                            text: tab;
+                            font-size: 13px;
+                            color: root.active_tab == i ? #262421 : #5a554f;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.active_tab = i;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Flickable {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 14px;
+
+                    if (root.active_tab == 0): StateViewer {
+                        json: state_json;
+                        error: state_error;
+                        refresh_state => root.refresh_state();
+                    }
+
+                    if (root.active_tab == 1): NewEntry { }
+
+                    if (root.active_tab == 2): Entries {
+                        entries: root.entries;
+                        error: root.entries_error;
+                    }
+
+                    if (root.active_tab == 3): Config {
+                        data_dir: root.data_dir;
+                        node_id: root.node_id;
+                        peer_connect_input: root.peer_connect_input;
+                        connected_peers: root.connected_peers;
+                        connect_peer => root.connect_peer();
+                    }
+                }
+            }
+        }
+    }
+}

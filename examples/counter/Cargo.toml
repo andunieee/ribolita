@@ -1,0 +1,16 @@
+[package]
+name = "example_counter"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ribolita_common = { path = "../../common" }
+ribolita_wasm_shared = { path = "../../wasm_shared" }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+rmpv = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }

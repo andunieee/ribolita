@@ -1,0 +1,57 @@
+import { Card } from "../components.slint";
+import { ScrollView, ComboBox, LineEdit, Button } from "std-widgets.slint";
+import { Entry, KeyValue, EntryEdit } from "../components/entry_edit.slint";
+
+export component Entries inherits VerticalLayout {
+    in-out property <[Entry]> entries;
+    in-out property <string> error;
+    property <int> selected_index: -1;
+
+    spacing: 14px;
+    Card {
+        VerticalLayout {
+            spacing: 8px;
+            if (root.error != ""): Text {
+                text: root.error;
+                color: #8d3434;
+                font-size: 12px;
+            }
+            ScrollView {
+                height: 200px;
+                VerticalLayout {
+                    spacing: 4px;
+                    for entry[i] in root.entries: Rectangle {
+                        background: root.selected_index == i ? #e9e1d6 : #ffffff;
+                        border-width: 1px;
+                        border-color: #d6cfc4;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            padding: 8px;
+                            Text {
+                                text: "#" + entry.id + " · " + entry.kind;
+                            }
+
+                            Text {
+                                text: "when: " + entry.when;
+                                font-size: 11px;
+                                color: #5a554f;
+                            }
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                selected_index = i
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if selected_index >= 0: Card {
+        EntryEdit { }
+    }
+}

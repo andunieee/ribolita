@@ -1,0 +1,19 @@
+export component Card inherits Rectangle {
+    in property <string> title: "";
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #d6cfc4;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        if (title != ""): Text {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c2a27;
+            text: root.title;
+        }
+
+        @children
+    }
+}

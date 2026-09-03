@@ -1,0 +1,26 @@
+{
+  "name": "Counter",
+  "description": "Simple counter. Increase or decrease a numeric value stored in state.",
+  "kinds": {
+    "increase": {
+      "description": "Increment counter by amount.",
+      "values": {
+        "amount": {
+          "type": "integer",
+          "optional": true,
+          "description": "Amount to add to counter."
+        }
+      }
+    },
+    "decrease": {
+      "description": "Decrement counter by amount.",
+      "values": {
+        "amount": {
+          "type": "integer",
+          "optional": true,
+          "description": "Amount to subtract from counter."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,161 @@
+import { Card } from "card.slint";
+import {
+    ComboBox,
+    LineEdit,
+    Button,
+    DatePickerPopup,
+    TimePickerPopup,
+    Date,
+    Time,
+} from "std-widgets.slint";
+
+export struct KeyValue {
+    key: string,
+    value: string,
+}
+
+export struct Entry {
+    id: int,
+    when: string,
+    kind: string,
+    values: [KeyValue],
+}
+
+export struct KeyValueSpec {
+    name: string,
+    description: string,
+    type: string,
+    optional: bool,
+}
+
+export struct KindSpec {
+    name: string,
+    description: string,
+}
+
+export component EntryEdit inherits VerticalLayout {
+    in-out property <[KindSpec]> kinds;
+
+    in-out property <[KeyValue]> values;
+    in-out property <string> kind: "";
+
+    property <int> kind_index: 0;
+    property <string> when_label: "now";
+    property <Date> when_date;
+    property <Time> when_time;
+
+    spacing: 14px;
+    Card {
+        VerticalLayout {
+            spacing: 10px;
+            if (root.kinds.length > 0): ComboBox {
+                model: root.kinds;
+                current-index <=> root.kind_index;
+                horizontal-stretch: 1;
+                selected(text) => {
+                    root.kind = text;
+                }
+            }
+            if (root.kind_names.length == 0): LineEdit {
+                text <=> root.kind;
+                placeholder-text: "Kind";
+                horizontal-stretch: 1;
+            }
+
+            Button {
+                text: root.when_label;
+                clicked => {
+                    date-picker.show();
+                }
+            }
+
+            date-picker := DatePickerPopup {
+                x: (400px - self.width) / 2;
+                y: (600px - self.height) / 2;
+                close-policy: PopupClosePolicy.no-auto-close;
+                title: "Event Date";
+
+                accepted(date) => {
+                    root.when_date = date;
+                    date-picker.close();
+                    time-picker.show();
+                }
+                canceled => {
+                    date-picker.close();
+                }
+            }
+
+            time-picker := TimePickerPopup {
+                x: (400px - self.width) / 2;
+                y: (600px - self.height) / 2;
+                title: "Event Time";
+
+                accepted(time) => {
+                    root.when_time = time;
+                    time-picker.close();
+                }
+
+                canceled => {
+                    time-picker.close();
+                }
+            }
+
+            Rectangle {
+                background: #f7f3ee;
+                border-width: 1px;
+                border-color: #d6cfc4;
+                border-radius: 10px;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    for row[i] in root.values: HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            text: row.key;
+                            placeholder-text: "key";
+                            horizontal-stretch: 1;
+                            edited(text) => {
+                                root.values[i].key = text;
+                            }
+                        }
+
+                        LineEdit {
+                            text: row.value;
+                            placeholder-text: "value";
+                            horizontal-stretch: 1;
+                            edited(text) => {
+                                root.values[i].value = text;
+                            }
+                        }
+
+                        Button {
+                            text: "Remove";
+                            clicked => {
+                                root.remove_new_entry_row(i);
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: "Add Field";
+                        clicked => {
+                            root.add_new_entry_row();
+                        }
+                    }
+                }
+            }
+
+            if (root.new_entry_error != ""): Text {
+                text: root.new_entry_error;
+                color: #8d3434;
+                font-size: 12px;
+            }
+            Button {
+                text: "Submit Entry";
+                clicked => {
+                    root.submit_new_entry();
+                }
+            }
+        }
+    }
+}

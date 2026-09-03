@@ -1,0 +1,39 @@
+[package]
+name = "slint_app"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+anyhow = { workspace = true }
+dirs = "6.0.0"
+iroh = "0.98"
+ribolita = { path = "../core", default-features = false, features = ["backend-redb"] }
+ribolita_common = { path = "../common" }
+rmpv = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+slint = "1.8.0"
+tokio = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.8.0", features = ["backend-android-activity-06"] }
+
+[package.metadata.android]
+apk_name = "ribolita"
+package = "com.ribolita.app"
+resources = "android/res"
+icon = "@mipmap/ic_launcher"
+label = "ribolita"
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 34
+
+[build-dependencies]
+serde_json = { workspace = true }
+slint-build = "1.8.0"

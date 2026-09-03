@@ -1,0 +1,16 @@
+[package]
+name = "ribolita_server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.7", features = ["multipart"] }
+envy = "0.4"
+maud = "0.26"
+rand = "0.8"
+ribolita = { path = "../core" }
+ribolita_common = { path = "../common" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

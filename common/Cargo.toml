@@ -1,0 +1,14 @@
+[package]
+name = "ribolita_common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmpv = { workspace = true, features = ["with-serde"] }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+num_enum = { workspace = true }
+serde_json = { workspace = true }
+maplit = { workspace = true }

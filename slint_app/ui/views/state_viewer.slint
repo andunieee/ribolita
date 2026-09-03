@@ -1,0 +1,50 @@
+import {
+    Button,
+    ComboBox,
+    LineEdit,
+    ScrollView,
+    TextEdit,
+} from "std-widgets.slint";
+import { Card } from "../components/card.slint";
+
+export component StateViewer inherits VerticalLayout {
+    in property <string> path;
+    in property <string> json;
+    in property <string> error;
+    callback refresh_state();
+
+    spacing: 14px;
+    Card {
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 10px;
+                LineEdit {
+                    text: root.path;
+                    placeholder-text: "Path like field.0.nested";
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: "Refresh";
+                    clicked => {
+                        root.refresh_state();
+                    }
+                }
+            }
+
+            if (root.error != ""): Text {
+                text: root.error;
+                color: #8d3434;
+                font-size: 12px;
+            }
+            ScrollView {
+                height: 360px;
+                TextEdit {
+                    text: root.json;
+                    read-only: true;
+                }
+            }
+        }
+    }
+}
