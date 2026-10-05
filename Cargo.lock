@@ -1112,6 +1112,7 @@ dependencies = [
  "mimalloc",
  "ribolita",
  "ribolita_common",
+ "ribolita_node",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -1635,6 +1636,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
+]
+
+[[package]]
+name = "cuid"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52123bdcdfea0702a97bd3deed4bbf6d83e02b4d157a9a0e6067f95213644489"
+dependencies = [
+ "cuid1",
+]
+
+[[package]]
+name = "cuid-util"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d59a706635108a7e8eaae7ec8e6154504fafa4a415ef38690d94fccea051757"
+
+[[package]]
+name = "cuid1"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "437fd10143ebee9e85c77c7ce7b8e8ecfec933709e4350d06f67c8ea2a12df1e"
+dependencies = [
+ "cuid-util",
+ "getrandom 0.4.2",
+ "hostname",
+ "num",
+ "rand 0.10.1",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -3033,6 +3064,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4920,12 +4962,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "num"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+dependencies = [
+ "num-bigint",
+ "num-complex",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
  "num-traits",
 ]
 
@@ -4952,6 +5017,16 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-iter"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b"
+dependencies = [
+ "num-integer",
  "num-traits",
 ]
 
@@ -6350,13 +6425,16 @@ name = "ribolita"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "libmdbx",
  "log",
  "redb",
  "ribolita_common",
  "rmp-serde",
  "rmpv",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "wasmtime",
 ]
@@ -6365,6 +6443,7 @@ dependencies = [
 name = "ribolita_common"
 version = "0.1.0"
 dependencies = [
+ "cuid",
  "log",
  "maplit",
  "num_enum",
@@ -6376,16 +6455,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ribolita_node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iroh",
+ "ribolita",
+ "ribolita_common",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "ribolita_server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "envy",
+ "iroh",
  "maud",
  "rand 0.8.5",
  "ribolita",
  "ribolita_common",
+ "ribolita_node",
  "serde",
  "serde_json",
  "tokio",
@@ -7079,9 +7174,9 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
- "iroh",
  "ribolita",
  "ribolita_common",
+ "ribolita_node",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -8218,7 +8313,17 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "uuid-rng-internal",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-rng-internal"
+version = "1.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41792896a8681503d839b89f31aa4b0d6f752b0054ae86bab412ea09dcb9fc6c"
+dependencies = [
+ "getrandom 0.4.2",
 ]
 
 [[package]]

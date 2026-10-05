@@ -12,3 +12,8 @@ log = { workspace = true }
 num_enum = { workspace = true }
 serde_json = { workspace = true }
 maplit = { workspace = true }
+cuid = { version = "2.0.4", default-features = false, features = ["v1"], optional = true }
+
+[features]
+# generating entry ids (hosts need it, programs don't)
+ids = ["dep:cuid"]

@@ -13,9 +13,14 @@ wasmtime = "35.0.0"
 libmdbx = { version = "0.6", optional = true }
 redb = { version = "2", optional = true }
 anyhow = { workspace = true }
-ribolita_common = { path = "../common" }
+ribolita_common = { path = "../common", features = ["ids"] }
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+blake3 = "1"
+
+[dev-dependencies]
+tempfile = "3"

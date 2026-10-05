@@ -1568,7 +1568,10 @@ mod tests {
         let rows = vec![(vec![1u8, 2], vec![3u8]), (vec![], vec![4u8, 5, 6])];
         let blob = join_rows(&rows);
         let split = split_rows(&blob).unwrap();
-        assert_eq!(split, vec![(&[1u8, 2][..], &[3u8][..]), (&[][..], &[4u8, 5, 6][..])]);
+        assert_eq!(
+            split,
+            vec![(&[1u8, 2][..], &[3u8][..]), (&[][..], &[4u8, 5, 6][..])]
+        );
 
         // every truncation must be rejected rather than panic
         for len in 0..blob.len() {
