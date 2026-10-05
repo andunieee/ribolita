@@ -1,16 +1,36 @@
-import { Card } from "../components.slint";
-import { ScrollView, ComboBox, LineEdit, Button } from "std-widgets.slint";
-import { Entry, KeyValue, EntryEdit } from "../components/entry_edit.slint";
+import { Card } from "../components/card.slint";
+import { ScrollView, Button } from "std-widgets.slint";
+import { EntrySummary, KeyValue, EntryEdit } from "../components/entry_edit.slint";
 
 export component Entries inherits VerticalLayout {
-    in-out property <[Entry]> entries;
-    in-out property <string> error;
-    property <int> selected_index: -1;
+    in property <[EntrySummary]> entries;
+    in property <string> error;
+    in property <int> selected_index: -1;
+
+    in property <[string]> kinds;
+    in property <string> edit_error;
+    in-out property <string> edit_kind;
+    in-out property <string> edit_when;
+    in-out property <[KeyValue]> edit_values;
+
+    callback refresh();
+    callback select(int);
+    callback kind_selected(string);
+    callback add_row();
+    callback remove_row(int);
+    callback save();
 
     spacing: 14px;
     Card {
         VerticalLayout {
             spacing: 8px;
+            Button {
+                text: "Refresh";
+                clicked => {
+                    root.refresh();
+                }
+            }
+
             if (root.error != ""): Text {
                 text: root.error;
                 color: #8d3434;
@@ -32,17 +52,15 @@ export component Entries inherits VerticalLayout {
                             }
 
                             Text {
-                                text: "when: " + entry.when;
+                                text: entry.when;
                                 font-size: 11px;
                                 color: #5a554f;
                             }
                         }
 
                         TouchArea {
-                            width: parent.width;
-                            height: parent.height;
                             clicked => {
-                                selected_index = i
+                                root.select(i);
                             }
                         }
                     }
@@ -51,7 +69,27 @@ export component Entries inherits VerticalLayout {
         }
     }
 
-    if selected_index >= 0: Card {
-        EntryEdit { }
+    if root.selected_index >= 0: Card {
+        title: "Edit Entry";
+        EntryEdit {
+            kinds: root.kinds;
+            error: root.edit_error;
+            submit_label: "Save (replays state)";
+            kind <=> root.edit_kind;
+            when <=> root.edit_when;
+            values <=> root.edit_values;
+            kind_selected(k) => {
+                root.kind_selected(k);
+            }
+            add_row => {
+                root.add_row();
+            }
+            remove_row(i) => {
+                root.remove_row(i);
+            }
+            submit => {
+                root.save();
+            }
+        }
     }
 }

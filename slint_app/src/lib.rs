@@ -1,17 +1,15 @@
 mod iroh_net;
 
-use ribolita::{
-    EntriesDatabase, Query, ReadTransaction, RunEnvironment, StateDatabase, StateRedbDatabase,
-};
-use ribolita_common::{entry::Entry, key, rmp_json, state::State, value};
+use ribolita::{EntriesRedbDatabase, EntriesStore, Query, RunEnvironment, StateRedbDatabase};
+use ribolita_common::{entry::Entry, rmp_json};
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
-    collections::hash_map::DefaultHasher,
+    collections::{BTreeMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,43 +19,56 @@ slint::include_modules!();
 include!(concat!(env!("OUT_DIR"), "/embedded_wasm.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_metadata.rs"));
 
+type Env = RunEnvironment<StateRedbDatabase, EntriesRedbDatabase>;
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct AppMetadata {
     name: Option<String>,
-    kinds: std::collections::BTreeMap<String, KindMetadata>,
+    kinds: BTreeMap<String, KindMetadata>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[allow(dead_code)]
 struct KindMetadata {
     description: Option<String>,
-    values: Vec<FieldDef>,
+    #[serde(default)]
+    values: BTreeMap<String, FieldDef>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[allow(dead_code)]
 struct FieldDef {
-    name: String,
     #[serde(rename = "type")]
     field_type: String,
     optional: Option<bool>,
+    description: Option<String>,
 }
 
 struct AppState {
-    program: LoadedProgram,
-    entries: Vec<Entry>,
-    entries_db: Rc<EntriesDatabase>,
-    entries_model: Rc<VecModel<EntrySummary>>,
-    new_entry_model: Rc<VecModel<KeyValueRow>>,
-    edit_entry_model: Rc<VecModel<KeyValueRow>>,
+    env: Env,
     metadata: Option<AppMetadata>,
-    kind_order: Vec<String>,
+    entries: Vec<Entry>,
+    entries_model: Rc<VecModel<EntrySummary>>,
+    new_entry_model: Rc<VecModel<KeyValue>>,
+    edit_entry_model: Rc<VecModel<KeyValue>>,
 }
 
-#[derive(Clone)]
-struct LoadedProgram {
-    wasm: Arc<Vec<u8>>,
-    db_dir: PathBuf,
+impl AppState {
+    fn field_types(&self, kind: &str) -> Option<&BTreeMap<String, FieldDef>> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.kinds.get(kind))
+            .map(|k| &k.values)
+    }
+
+    /// value rows for a new entry of `kind`: one empty row per declared field
+    fn rows_for_kind(&self, kind: &str) -> Vec<KeyValue> {
+        let rows: Vec<KeyValue> = self
+            .field_types(kind)
+            .map(|fields| fields.keys().map(|name| kv(name, "")).collect())
+            .unwrap_or_default();
+        if rows.is_empty() { vec![kv("", "")] } else { rows }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -74,88 +85,54 @@ pub fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
     let data_dir = default_data_dir();
 
-    let wasm_bytes = Arc::new(WASM.to_vec());
-    let hasher = DefaultHasher::new();
-    let hash = (&wasm_bytes as &[u8]).iter().fold(hasher, |mut h, b| {
-        b.hash(&mut h);
-        h
-    })
-    .finish();
-    let db_dir = data_dir
-        .join("programs")
-        .join(format!("embedded-{hash:016x}"));
-    if let Err(err) = std::fs::create_dir_all(&db_dir) {
-        eprintln!("Failed to create data dir: {err}");
-    }
-    let program = LoadedProgram {
-        wasm: wasm_bytes,
-        db_dir,
+    let metadata: Option<AppMetadata> = match serde_json::from_str(METADATA_JSON) {
+        Ok(metadata) => Some(metadata),
+        Err(err) => {
+            eprintln!("ignoring invalid metadata.json: {err}");
+            None
+        }
     };
-
-    let entries_db = Rc::new(init_entries_db(&program.db_dir));
-
-    let entries_model = Rc::new(VecModel::from(Vec::<EntrySummary>::new()));
-    let new_entry_model = Rc::new(VecModel::from(vec![KeyValueRow {
-        key: SharedString::from(""),
-        value: SharedString::from(""),
-    }]));
-    let edit_entry_model = Rc::new(VecModel::from(Vec::<KeyValueRow>::new()));
-
-    let metadata: Option<AppMetadata> = if !METADATA_JSON.is_empty() {
-        serde_json::from_str(METADATA_JSON).ok()
-    } else {
-        None
-    };
-    if let Some(name) = metadata.as_ref().and_then(|m| m.name.as_deref()) {
-        app.set_app_title(name.into());
-    }
-    let kind_order: Vec<String> = metadata
+    let program_name = metadata
         .as_ref()
-        .map(|m| m.kinds.keys().cloned().collect())
+        .and_then(|m| m.name.clone())
+        .unwrap_or_else(|| "program".to_string());
+    app.set_app_title(program_name.as_str().into());
+
+    let env = open_env(&data_dir, &program_name)
+        .map_err(|err| slint::PlatformError::Other(format!("failed to open program: {err}")))?;
+
+    let kind_names: Vec<SharedString> = metadata
+        .as_ref()
+        .map(|m| m.kinds.keys().map(|k| k.as_str().into()).collect())
         .unwrap_or_default();
-    let kind_names: Vec<SharedString> =
-        kind_order.iter().map(|k| SharedString::from(k.as_str())).collect();
-    let kind_model = Rc::new(VecModel::from(kind_names));
-    app.set_kind_names(ModelRc::from(kind_model.clone()));
-
-    if !kind_order.is_empty() {
-        app.set_new_kind_index(0);
-        app.set_new_entry_kind(kind_order[0].as_str().into());
-    }
-
-    let has_kinds = !kind_order.is_empty();
+    app.set_kind_names(ModelRc::new(VecModel::from(kind_names.clone())));
 
     let state = Rc::new(RefCell::new(AppState {
-        program,
-        entries: Vec::new(),
-        entries_db: entries_db.clone(),
-        entries_model: entries_model.clone(),
-        new_entry_model: new_entry_model.clone(),
-        edit_entry_model: edit_entry_model.clone(),
+        env,
         metadata,
-        kind_order,
+        entries: Vec::new(),
+        entries_model: Rc::new(VecModel::default()),
+        new_entry_model: Rc::new(VecModel::default()),
+        edit_entry_model: Rc::new(VecModel::default()),
     }));
-
-    // populate fields for the first kind
-    if has_kinds {
-        let mut state_mut = state.borrow_mut();
-        populate_fields_for_kind(&mut state_mut, &app, 0);
+    {
+        let state = state.borrow();
+        let first_kind = kind_names.first().cloned().unwrap_or_default();
+        app.set_new_entry_kind(first_kind.clone());
+        state
+            .new_entry_model
+            .set_vec(state.rows_for_kind(first_kind.as_str()));
+        app.set_new_entry_values(ModelRc::from(state.new_entry_model.clone()));
+        app.set_entry_values(ModelRc::from(state.edit_entry_model.clone()));
+        app.set_entries(ModelRc::from(state.entries_model.clone()));
     }
 
     // iroh networking
     let (iroh_handle, iroh_events) = iroh_net::spawn(data_dir.clone());
     app.set_node_id(iroh_handle.node_id.clone().into());
-    let iroh_cmd = iroh_handle.cmd_tx.clone();
-    let iroh_cmd2 = iroh_handle.cmd_tx.clone();
-
-    let connected_peers_model = Rc::new(VecModel::<SharedString>::from(Vec::new()));
+    let connected_peers_model = Rc::new(VecModel::<SharedString>::default());
     app.set_connected_peers(ModelRc::from(connected_peers_model.clone()));
-
     app.set_data_dir(data_dir.to_string_lossy().to_string().into());
-    app.set_entries(ModelRc::from(entries_model));
-    app.set_new_entry_values(ModelRc::from(new_entry_model));
-    app.set_entry_values(ModelRc::from(edit_entry_model));
-    app.set_selected_entry_index(-1);
 
     let app_handle = app.as_weak();
     let state_handle = state.clone();
@@ -163,196 +140,104 @@ pub fn main() -> Result<(), slint::PlatformError> {
         let Some(app) = app_handle.upgrade() else {
             return;
         };
-        let state_path = app.get_state_path();
-        let program = state_handle.borrow().program.clone();
-
-        let state_dir = program.db_dir.join("state");
-        if let Err(err) = std::fs::create_dir_all(&state_dir) {
-            app.set_state_error(format!("Failed to open state dir: {err}").into());
-            return;
+        match state_handle.borrow().env.state_json(app.get_state_path().as_str()) {
+            Ok(json) => {
+                let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
+                app.set_state_json(pretty.into());
+                app.set_state_error("".into());
+            }
+            Err(err) => app.set_state_error(format!("{err:#}").into()),
         }
-        let state_db = match StateRedbDatabase::init(&state_dir) {
-            Ok(db) => db,
-            Err(err) => {
-                app.set_state_error(format!("Failed to open state db: {err}").into());
-                return;
-            }
-        };
-        let txn = match state_db.start_read_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                app.set_state_error(format!("State read failed: {err}").into());
-                return;
-            }
-        };
-        let path_parts = if state_path.is_empty() {
-            Vec::new()
-        } else {
-            key::parse(state_path.as_str())
-        };
-        let prefix = key::to_bytes(&path_parts);
-        let (num_rows, data) = match txn.get(&prefix) {
-            Ok(result) => result,
-            Err(err) => {
-                app.set_state_error(format!("State query failed: {err}").into());
-                return;
-            }
-        };
-        let state_value: State = match value::from_bytes(num_rows, &data) {
-            Ok(val) => val,
-            Err(err) => {
-                app.set_state_error(format!("Failed to decode state: {err}").into());
-                return;
-            }
-        };
-        let json_value = rmp_json::rmp_value_to_json_value(&state_value.0);
-        let pretty =
-            serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "{}".to_string());
-        app.set_state_json(pretty.into());
-        app.set_state_error("".into());
     });
+
+    // new entry form
+    let state_handle = state.clone();
+    app.on_new_entry_kind_selected(move |kind| {
+        let state = state_handle.borrow();
+        state.new_entry_model.set_vec(state.rows_for_kind(&kind));
+    });
+    let state_handle = state.clone();
+    app.on_add_new_entry_row(move || state_handle.borrow().new_entry_model.push(kv("", "")));
+    let state_handle = state.clone();
+    app.on_remove_new_entry_row(move |index| remove_row(&state_handle.borrow().new_entry_model, index));
 
     let app_handle = app.as_weak();
     let state_handle = state.clone();
-    app.on_add_new_entry_row(move || {
-        let Some(app) = app_handle.upgrade() else {
-            return;
-        };
-        let state = state_handle.borrow_mut();
-        state.new_entry_model.push(KeyValueRow {
-            key: SharedString::from(""),
-            value: SharedString::from(""),
-        });
-        app.set_new_entry_values(ModelRc::from(state.new_entry_model.clone()));
-    });
-
-    let app_handle = app.as_weak();
-    let state_handle = state.clone();
-    app.on_update_new_entry_row(move |index, key, value| {
-        let Some(_app) = app_handle.upgrade() else {
-            return;
-        };
-        let state = state_handle.borrow_mut();
-        if index < 0 {
-            return;
-        }
-        let idx = index as usize;
-        if idx >= state.new_entry_model.row_count() {
-            return;
-        }
-        state
-            .new_entry_model
-            .set_row_data(idx, KeyValueRow { key, value });
-    });
-
-    let app_handle = app.as_weak();
-    let state_handle = state.clone();
-    app.on_remove_new_entry_row(move |index| {
-        let Some(app) = app_handle.upgrade() else {
-            return;
-        };
-        let state = state_handle.borrow_mut();
-        if index < 0 {
-            return;
-        }
-        let idx = index as usize;
-        if idx >= state.new_entry_model.row_count() {
-            return;
-        }
-        state.new_entry_model.remove(idx);
-        app.set_new_entry_values(ModelRc::from(state.new_entry_model.clone()));
-    });
-
-    let app_handle = app.as_weak();
-    let state_handle = state.clone();
+    let iroh_cmd = iroh_handle.cmd_tx.clone();
     app.on_submit_new_entry(move || {
         let Some(app) = app_handle.upgrade() else {
             return;
         };
-        let program = state_handle.borrow().program.clone();
-        let kind = app.get_new_entry_kind();
-        if kind.trim().is_empty() {
-            app.set_new_entry_error("Kind is required".into());
-            return;
-        }
-        let when = match parse_when(app.get_new_entry_when().as_str()) {
-            Ok(Some(ts)) => ts,
-            Ok(None) => now_timestamp(),
-            Err(err) => {
-                app.set_new_entry_error(err.into());
-                return;
+        let result = (|| {
+            let mut state = state_handle.borrow_mut();
+            let kind = app.get_new_entry_kind().trim().to_string();
+            if kind.is_empty() {
+                return Err("Kind is required".to_string());
             }
-        };
-        let values = {
-            let state = state_handle.borrow();
-            match collect_values(&state.new_entry_model) {
-                Ok(vals) => vals,
-                Err(err) => {
-                    app.set_new_entry_error(err.into());
-                    return;
-                }
-            }
-        };
-        let entry = Entry {
-            id: 0,
-            when,
-            kind: kind.to_string(),
-            values,
-        };
-        let net_entry = entry.clone();
-        let mut env: RunEnvironment<StateRedbDatabase> =
-            match RunEnvironment::new(&program.db_dir, program.wasm.as_slice()) {
-                Ok(env) => env,
-                Err(err) => {
-                    app.set_new_entry_error(format!("Failed to load wasm: {err}").into());
-                    return;
-                }
+            let when = parse_when(&app.get_new_entry_when())?.unwrap_or_else(now_timestamp);
+            let values = collect_values(&state.new_entry_model, state.field_types(&kind))?;
+            let mut entry = Entry {
+                id: 0,
+                when,
+                kind,
+                values,
             };
-        if let Err(err) = env.run(entry) {
-            app.set_new_entry_error(format!("Entry run failed: {err}").into());
-            return;
+            entry.id = state.env.run(entry.clone()).map_err(|err| format!("{err}"))?;
+            iroh_cmd.send(iroh_net::Cmd::PublishEntry(entry.clone())).ok();
+            state.new_entry_model.set_vec(state.rows_for_kind(&entry.kind));
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                app.set_new_entry_error("".into());
+                app.set_new_entry_when("".into());
+                refresh_entries(&app, &state_handle);
+                app.invoke_refresh_state();
+            }
+            Err(err) => app.set_new_entry_error(err.into()),
         }
-        iroh_cmd.send(iroh_net::Cmd::PublishEntry(net_entry)).ok();
-        app.set_new_entry_error("".into());
-        app.set_new_entry_when("".into());
-        let mut state = state_handle.borrow_mut();
-        let current_index = app.get_new_kind_index();
-        if current_index >= 0 && state.metadata.is_some() {
-            populate_fields_for_kind(&mut state, &app, current_index as usize);
-        } else {
-            state.new_entry_model = Rc::new(VecModel::from(vec![KeyValueRow {
-                key: SharedString::from(""),
-                value: SharedString::from(""),
-            }]));
-            app.set_new_entry_values(ModelRc::from(state.new_entry_model.clone()));
+    });
+
+    // entries list and editor
+    let app_handle = app.as_weak();
+    let state_handle = state.clone();
+    app.on_refresh_entries(move || {
+        if let Some(app) = app_handle.upgrade() {
+            refresh_entries(&app, &state_handle);
         }
-        drop(state);
-        refresh_entries(&app_handle, &state_handle);
     });
 
     let app_handle = app.as_weak();
     let state_handle = state.clone();
-    app.on_refresh_entries(move || {
-        refresh_entries(&app_handle, &state_handle);
-    });
-
-    let app_handle = app.as_weak();
-    app.on_connect_peer(move || {
-        eprintln!("connect_peer callback triggered");
+    app.on_select_entry(move |index| {
         let Some(app) = app_handle.upgrade() else {
-            eprintln!("connect_peer: app gone");
             return;
         };
-        let peer_id = app.get_peer_connect_input().to_string();
-        eprintln!("connect_peer: input='{peer_id}'");
-        if !peer_id.is_empty() {
-            eprintln!("connect_peer: sending Cmd::ConnectPeer({peer_id})");
-            if iroh_cmd2.send(iroh_net::Cmd::ConnectPeer(peer_id)).is_err() {
-                eprintln!("connect_peer: cmd_tx send failed (iroh thread dead?)");
-            }
-            app.set_peer_connect_input("".into());
-        }
+        let state = state_handle.borrow();
+        let Some(entry) = usize::try_from(index).ok().and_then(|i| state.entries.get(i)) else {
+            return;
+        };
+        app.set_selected_entry_index(index);
+        app.set_entry_kind(entry.kind.as_str().into());
+        app.set_entry_when(format_when(entry.when).into());
+        app.set_entry_editor_error("".into());
+        state.edit_entry_model.set_vec(
+            entry
+                .values
+                .iter()
+                .map(|(k, v)| kv(k, &value_to_text(v)))
+                .collect::<Vec<_>>(),
+        );
     });
+    let state_handle = state.clone();
+    app.on_entry_kind_selected(move |kind| {
+        let state = state_handle.borrow();
+        state.edit_entry_model.set_vec(state.rows_for_kind(&kind));
+    });
+    let state_handle = state.clone();
+    app.on_add_entry_row(move || state_handle.borrow().edit_entry_model.push(kv("", "")));
+    let state_handle = state.clone();
+    app.on_remove_entry_row(move |index| remove_row(&state_handle.borrow().edit_entry_model, index));
 
     let app_handle = app.as_weak();
     let state_handle = state.clone();
@@ -360,182 +245,144 @@ pub fn main() -> Result<(), slint::PlatformError> {
         let Some(app) = app_handle.upgrade() else {
             return;
         };
-        let selected = app.get_selected_entry_index();
-        if selected < 0 {
-            app.set_entry_editor_error("Select an entry to edit".into());
-            return;
-        }
-        let idx = selected as usize;
-        let mut state = state_handle.borrow_mut();
-        if idx >= state.entries.len() {
-            app.set_entry_editor_error("Invalid entry selection".into());
-            return;
-        }
-        let original = state.entries[idx].clone();
-        let kind = app.get_entry_kind();
-        if kind.trim().is_empty() {
-            app.set_entry_editor_error("Kind is required".into());
-            return;
-        }
-        let when = match parse_when(app.get_entry_when().as_str()) {
-            Ok(Some(ts)) => ts,
-            Ok(None) => original.when,
-            Err(err) => {
-                app.set_entry_editor_error(err.into());
-                return;
+        let result = (|| {
+            let mut state = state_handle.borrow_mut();
+            let original = usize::try_from(app.get_selected_entry_index())
+                .ok()
+                .and_then(|i| state.entries.get(i))
+                .cloned()
+                .ok_or("Select an entry to edit")?;
+            let kind = app.get_entry_kind().trim().to_string();
+            if kind.is_empty() {
+                return Err("Kind is required".to_string());
             }
-        };
-        let values = match collect_values(&state.edit_entry_model) {
-            Ok(vals) => vals,
-            Err(err) => {
-                app.set_entry_editor_error(err.into());
-                return;
+            let updated = Entry {
+                id: original.id,
+                when: parse_when(&app.get_entry_when())?.unwrap_or(original.when),
+                values: collect_values(&state.edit_entry_model, state.field_types(&kind))?,
+                kind,
+            };
+            // the state was derived from the old entry, so it gets rebuilt from the whole log
+            state.env.update_entries(&[&updated]).map_err(|err| format!("{err}"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                refresh_entries(&app, &state_handle);
+                app.invoke_refresh_state();
             }
-        };
-        let updated = Entry {
-            id: original.id,
-            when,
-            kind: kind.to_string(),
-            values,
-        };
-
-        let entries_db = state.entries_db.clone();
-        let txn = match entries_db.start_write_txn() {
-            Ok(txn) => txn,
-            Err(err) => {
-                app.set_entry_editor_error(format!("Entries write failed: {err}").into());
-                return;
-            }
-        };
-        if let Err(err) = entries_db.save(&txn, updated.id, &updated) {
-            app.set_entry_editor_error(format!("Failed to save entry: {err}").into());
-            return;
+            Err(err) => app.set_entry_editor_error(err.into()),
         }
-        if let Err(err) = txn.commit() {
-            app.set_entry_editor_error(format!("Failed to commit entry: {err}").into());
-            return;
-        }
-
-        state.entries[idx] = updated.clone();
-        state.entries_model.set_row_data(
-            idx,
-            EntrySummary {
-                id: updated.id as i32,
-                when: SharedString::from(format_ts(updated.when)),
-                kind: SharedString::from(updated.kind.clone()),
-            },
-        );
-        app.set_entry_editor_error("".into());
     });
 
-    refresh_entries(&app.as_weak(), &state);
+    let app_handle = app.as_weak();
+    let iroh_cmd = iroh_handle.cmd_tx.clone();
+    app.on_connect_peer(move || {
+        let Some(app) = app_handle.upgrade() else {
+            return;
+        };
+        let peer_id = app.get_peer_connect_input().trim().to_string();
+        if !peer_id.is_empty() {
+            if iroh_cmd.send(iroh_net::Cmd::ConnectPeer(peer_id)).is_err() {
+                eprintln!("connect_peer: iroh thread is gone");
+            }
+            app.set_peer_connect_input("".into());
+        }
+    });
+
+    refresh_entries(&app, &state);
+    app.invoke_refresh_state();
 
     // iroh event poller
     let timer = slint::Timer::default();
-    let timer_state = state.clone();
-    let timer_app = app.as_weak();
-    let timer_peers = connected_peers_model.clone();
-    let timer_entries = entries_db.clone();
+    let app_handle = app.as_weak();
+    let state_handle = state.clone();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(200),
         move || {
+            let Some(app) = app_handle.upgrade() else {
+                return;
+            };
             while let Ok(event) = iroh_events.try_recv() {
                 match event {
-                    iroh_net::Event::EntryReceived(mut entry) => {
-                        let last_id = timer_entries
-                            .start_read_txn()
-                            .ok()
-                            .and_then(|rt| timer_entries.get_last_id(&rt).ok())
-                            .unwrap_or(0);
-                        entry.id = last_id + 1;
-                        if let Ok(wt) = timer_entries.start_write_txn() {
-                            if timer_entries.save(&wt, entry.id, &entry).is_ok() {
-                                let _ = wt.commit();
+                    iroh_net::Event::EntryReceived(entry) => {
+                        // remote entries get a local id and go through the program like local ones
+                        let result = state_handle.borrow_mut().env.run(entry);
+                        match result {
+                            Ok(_) => {
+                                refresh_entries(&app, &state_handle);
+                                app.invoke_refresh_state();
                             }
-                        }
-                        refresh_entries(&timer_app, &timer_state);
-                    }
-                    iroh_net::Event::NodeId(id) => {
-                        if let Some(app) = timer_app.upgrade() {
-                            app.set_node_id(id.into());
+                            Err(err) => eprintln!("rejected remote entry: {err}"),
                         }
                     }
-                    iroh_net::Event::PeerConnected(id) => {
-                        timer_peers.push(id.into());
-                    }
+                    iroh_net::Event::NodeId(id) => app.set_node_id(id.into()),
+                    iroh_net::Event::PeerConnected(id) => connected_peers_model.push(id.into()),
                     iroh_net::Event::PeerDisconnected(id) => {
-                        let s = SharedString::from(id.as_str());
-                        for i in 0..timer_peers.row_count() {
-                            if timer_peers.row_data(i) == Some(s.clone()) {
-                                timer_peers.remove(i);
-                                break;
-                            }
+                        if let Some(i) = connected_peers_model.iter().position(|p| p == id.as_str()) {
+                            connected_peers_model.remove(i);
                         }
                     }
-                    iroh_net::Event::Error(msg) => {
-                        eprintln!("iroh: {msg}");
-                    }
+                    iroh_net::Event::Error(msg) => eprintln!("iroh: {msg}"),
                 }
             }
         },
     );
-    std::mem::forget(timer);
 
     app.run()
 }
 
-fn refresh_entries(
-    app_handle: &slint::Weak<AppWindow>,
-    state_handle: &Rc<RefCell<AppState>>,
-) {
-    let Some(app) = app_handle.upgrade() else {
-        return;
-    };
-    let entries_db = state_handle.borrow().entries_db.clone();
-    let txn = match entries_db.start_read_txn() {
-        Ok(txn) => txn,
-        Err(err) => {
-            app.set_entries_error(format!("Entries read failed: {err}").into());
-            return;
-        }
-    };
-    let query = Query::ByTimestamps {
+/// Opens the program's databases. They are keyed by program name, not by module, so a new build
+/// of the program keeps its entries; when the module changed, the state is rebuilt from them.
+fn open_env(data_dir: &std::path::Path, program_name: &str) -> Result<Env, String> {
+    let slug: String = program_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let db_dir = data_dir.join("programs").join(slug);
+    std::fs::create_dir_all(&db_dir).map_err(|e| e.to_string())?;
+    let mut env = Env::new(&db_dir, WASM).map_err(|e| e.to_string())?;
+
+    let mut hasher = DefaultHasher::new();
+    WASM.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+    let hash_path = db_dir.join("program.hash");
+    if std::fs::read_to_string(&hash_path).ok().as_deref() != Some(hash.as_str()) {
+        let count = env.replay().map_err(|e| format!("replaying with new program: {e}"))?;
+        eprintln!("program changed, replayed {count} entries");
+        std::fs::write(&hash_path, hash).map_err(|e| e.to_string())?;
+    }
+    Ok(env)
+}
+
+fn refresh_entries(app: &AppWindow, state_handle: &Rc<RefCell<AppState>>) {
+    let mut state = state_handle.borrow_mut();
+    let result = state.env.entries().query(Query::ByTimestamps {
         since: None,
         until: None,
         limit: Some(50),
-    };
-    let entries = match entries_db.query(&txn, query) {
+    });
+    let entries = match result {
         Ok(entries) => entries,
         Err(err) => {
             app.set_entries_error(format!("Failed to query entries: {err}").into());
             return;
         }
     };
-    let summaries = entries
-        .iter()
-        .map(|entry| EntrySummary {
-            id: entry.id as i32,
-            when: SharedString::from(format_ts(entry.when)),
-            kind: SharedString::from(entry.kind.clone()),
-        })
-        .collect::<Vec<_>>();
-    let mut state = state_handle.borrow_mut();
+    state.entries_model.set_vec(
+        entries
+            .iter()
+            .map(|entry| EntrySummary {
+                id: entry.id as i32,
+                when: format_when(entry.when).into(),
+                kind: entry.kind.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    );
     state.entries = entries;
-    replace_model(&state.entries_model, summaries);
-    app.set_entries(ModelRc::from(state.entries_model.clone()));
+    app.set_entries_error("".into());
     app.set_selected_entry_index(-1);
-    app.set_entry_kind("".into());
-    app.set_entry_when("".into());
-    app.set_edit_kind_index(-1);
-    state.edit_entry_model = Rc::new(VecModel::from(Vec::<KeyValueRow>::new()));
-    app.set_entry_values(ModelRc::from(state.edit_entry_model.clone()));
-}
-
-fn init_entries_db(db_dir: &std::path::Path) -> EntriesDatabase {
-    let entries_dir = db_dir.join("entries");
-    let _ = std::fs::create_dir_all(&entries_dir);
-    EntriesDatabase::init(&entries_dir).expect("Failed to open entries database")
 }
 
 fn default_data_dir() -> PathBuf {
@@ -546,9 +393,24 @@ fn default_data_dir() -> PathBuf {
         return android_dir.join("ribolita");
     }
     let base = dirs::data_local_dir()
-        .or_else(|| dirs::home_dir())
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("ribolita")
+}
+
+fn kv(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+fn remove_row(model: &VecModel<KeyValue>, index: i32) {
+    if let Ok(i) = usize::try_from(index)
+        && i < model.row_count()
+    {
+        model.remove(i);
+    }
 }
 
 fn now_timestamp() -> u64 {
@@ -558,56 +420,77 @@ fn now_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Parses the editor's "YYYY-M-D H:M" (UTC) or a raw unix timestamp. Empty means "now".
 fn parse_when(input: &str) -> Result<Option<u64>, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    trimmed
-        .parse::<u64>()
+    if let Ok(ts) = trimmed.parse::<u64>() {
+        return Ok(Some(ts));
+    }
+    let nums: Vec<u32> = trimmed
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().map_err(|_| format!("Invalid date: {trimmed}")))
+        .collect::<Result<_, _>>()?;
+    let [year, month, day, hour, minute] = nums[..] else {
+        return Err(format!("Invalid date: {trimmed}"));
+    };
+    chrono::NaiveDate::from_ymd_opt(year as i32, month, day)
+        .and_then(|d| d.and_hms_opt(hour, minute, 0))
+        .and_then(|dt| u64::try_from(dt.and_utc().timestamp()).ok())
         .map(Some)
-        .map_err(|_| "Timestamp must be a number".to_string())
+        .ok_or_else(|| format!("Invalid date: {trimmed}"))
 }
 
-fn format_ts(ts: u64) -> String {
-    let secs = ts as i64;
+fn format_when(ts: u64) -> String {
     use chrono::{TimeZone, Utc};
-    Utc.timestamp_opt(secs, 0)
+    Utc.timestamp_opt(ts as i64, 0)
         .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| ts.to_string())
 }
 
-fn collect_values(model: &VecModel<KeyValueRow>) -> Result<Vec<(String, rmpv::Value)>, String> {
+/// Text shown in the editor for a value: strings are shown bare, everything else as JSON.
+fn value_to_text(value: &rmpv::Value) -> String {
+    match value.as_str() {
+        Some(s) => s.to_string(),
+        None => rmp_json::rmp_value_to_json_value(value).to_string(),
+    }
+}
+
+/// Reads the editor rows as entry values. Values are JSON, except that fields declared as
+/// strings (or text that isn't valid JSON) are taken verbatim, so nobody has to type quotes.
+fn collect_values(
+    model: &VecModel<KeyValue>,
+    field_types: Option<&BTreeMap<String, FieldDef>>,
+) -> Result<Vec<(String, rmpv::Value)>, String> {
     let mut values = Vec::new();
-    for i in 0..model.row_count() {
-        let row = model.row_data(i).unwrap_or(KeyValueRow {
-            key: SharedString::from(""),
-            value: SharedString::from(""),
-        });
+    for row in model.iter() {
         let key = row.key.trim().to_string();
-        let value = row.value.trim().to_string();
-        if key.is_empty() && value.is_empty() {
-            continue;
+        let value = row.value.trim();
+        if value.is_empty() {
+            let optional = field_types
+                .and_then(|f| f.get(&key))
+                .is_none_or(|f| f.optional.unwrap_or(false));
+            if key.is_empty() || optional {
+                continue;
+            }
+            return Err(format!("Value for '{key}' is required"));
         }
         if key.is_empty() {
             return Err("Key cannot be empty".to_string());
         }
-        if value.is_empty() {
-            return Err(format!("Value for key '{key}' cannot be empty"));
-        }
-        let json_value: serde_json::Value = serde_json::from_str(&value)
-            .map_err(|err| format!("Invalid JSON for key '{key}': {err}"))?;
-        values.push((key, rmp_json::json_value_to_rmp_value(&json_value)));
+        let is_string = field_types
+            .and_then(|f| f.get(&key))
+            .is_some_and(|f| f.field_type == "string");
+        let value = match serde_json::from_str::<serde_json::Value>(value) {
+            Ok(serde_json::Value::String(s)) => rmpv::Value::String(s.into()),
+            Ok(json) if !is_string => rmp_json::json_value_to_rmp_value(&json),
+            _ => rmpv::Value::String(value.into()),
+        };
+        values.push((key, value));
     }
     Ok(values)
-}
-
-fn replace_model<T: Clone + 'static>(model: &Rc<VecModel<T>>, items: Vec<T>) {
-    while model.row_count() > 0 {
-        model.remove(0);
-    }
-    for item in items {
-        model.push(item);
-    }
 }

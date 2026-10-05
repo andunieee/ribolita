@@ -1,15 +1,16 @@
 #![allow(static_mut_refs)]
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc, dealloc, Layout};
 
 pub mod logger;
 
 use ribolita_common::{
     key::{self, KeyPart},
     value::{self, to_rows, SerializedRow, SerializedRowKey, SerializedRowValue},
-    Opcode, KEY_LEN_BYTES, ROW_COUNT_BYTES, VAL_LEN_BYTES,
+    Opcode, ROW_COUNT_BYTES,
 };
 
-#[unsafe(no_mangle)]
+// only exported on wasm: on native targets an unmangled `malloc` would replace libc's allocator
+#[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
 pub extern "C" fn malloc(size: usize) -> *mut u8 {
     if size == 0 {
         return std::ptr::dangling_mut();
@@ -48,22 +49,26 @@ pub fn external_println(str: String) {
     }
 }
 
-pub fn state_get<'de, T>(path: &[KeyPart]) -> Result<T, StateError>
+pub fn state_get<T>(path: &[KeyPart]) -> Result<T, StateError>
 where
-    T: serde::de::Deserialize<'de>,
+    T: serde::de::DeserializeOwned,
 {
-    unsafe {
-        let mut key = vec![0u8; key::measure(path)];
-        key::encode(path, &mut key);
-        let ptr = state_get_internal(key.as_ptr(), key.len());
+    let mut key = vec![0u8; key::measure(path)];
+    key::encode(path, &mut key);
+    let ptr = unsafe { state_get_internal(key.as_ptr(), key.len()) };
+    if (ptr as isize) <= 0 {
+        return Err(StateError::Failed);
+    }
 
-        // as the response we get a pointer to the state rows
-        let count = core::slice::from_raw_parts(ptr, ROW_COUNT_BYTES);
-        let buf_size = u32::from_le_bytes(count[0..ROW_COUNT_BYTES].try_into().unwrap()) as usize;
-        let data = &core::slice::from_raw_parts(ptr, ROW_COUNT_BYTES + buf_size)[ROW_COUNT_BYTES..];
-        let num_rows = usize::from_le_bytes(data[0..ROW_COUNT_BYTES].try_into().unwrap());
-        let v: T = value::from_bytes(num_rows, data)?;
-        Ok(v)
+    // the host allocated `[u32 blob_len][blob]` with our `malloc` and hands ownership to us
+    unsafe {
+        let len_bytes = core::slice::from_raw_parts(ptr, ROW_COUNT_BYTES);
+        let blob_len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+        let blob = core::slice::from_raw_parts(ptr.add(ROW_COUNT_BYTES), blob_len);
+        let result = value::from_bytes::<T>(blob).map_err(StateError::from);
+        let total = ROW_COUNT_BYTES + blob_len;
+        dealloc(ptr as *mut u8, Layout::from_size_align_unchecked(total, 1));
+        result
     }
 }
 
@@ -81,34 +86,13 @@ where
     to_rows(data, &mut rows)?;
 
     // now we compress all that into a blob of [n_rows][[key_len][val_len] * n_rows][[key][val] * n_rows]
-    let mut buf = Vec::with_capacity(
-        // estimate capacity needed based on first row
-        ROW_COUNT_BYTES
-            + rows.len()
-                * rows
-                    .first()
-                    .map(
-                        |SerializedRow(SerializedRowKey(key), SerializedRowValue(val))| {
-                            KEY_LEN_BYTES + VAL_LEN_BYTES + key.len() + val.len()
-                        },
-                    )
-                    .map(|est| est * 13 / 10 /* shoot up a little */)
-                    .unwrap_or(0),
-    );
-
-    buf.extend_from_slice(&(rows.len() as u32).to_le_bytes()); // ROW_COUNT_BYTES
-    rows.iter().for_each(
-        |SerializedRow(SerializedRowKey(key), SerializedRowValue(val))| {
-            buf.extend_from_slice(&(key.len() as u16).to_le_bytes()); // KEY_LEN_BYTES
-            buf.extend_from_slice(&(val.len() as u32).to_le_bytes()); // VAL_LEN_BYTES
-        },
-    );
-    rows.iter().for_each(
-        |SerializedRow(SerializedRowKey(key), SerializedRowValue(val))| {
-            buf.extend_from_slice(key);
-            buf.extend_from_slice(val);
-        },
-    );
+    let rows: Vec<(&[u8], &[u8])> = rows
+        .iter()
+        .map(|SerializedRow(SerializedRowKey(key), SerializedRowValue(val))| {
+            (key.as_slice(), val.as_slice())
+        })
+        .collect();
+    let buf = value::join_rows(&rows);
 
     unsafe {
         let res = state_modify_internal(

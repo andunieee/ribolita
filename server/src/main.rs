@@ -1,6 +1,7 @@
 use axum::{
     Router,
-    routing::{get, post},
+    extract::DefaultBodyLimit,
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
@@ -10,13 +11,15 @@ mod errors;
 mod programs;
 mod web;
 
+const MAX_WASM_SIZE: usize = 64 * 1024 * 1024;
+
 #[derive(Deserialize)]
 struct Settings {
-    #[serde(rename = "RIBOLITA_DATA_DIR", default = "default_data_dir")]
+    #[serde(default = "default_data_dir")]
     data_dir: PathBuf,
-    #[serde(rename = "RIBOLITA_HOST", default = "default_host")]
+    #[serde(default = "default_host")]
     host: String,
-    #[serde(rename = "RIBOLITA_PORT", default = "default_port")]
+    #[serde(default = "default_port")]
     port: u16,
 }
 
@@ -34,7 +37,8 @@ fn default_port() -> u16 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let settings: Settings = envy::from_env()?;
+    // reads RIBOLITA_DATA_DIR, RIBOLITA_HOST and RIBOLITA_PORT
+    let settings: Settings = envy::prefixed("RIBOLITA_").from_env()?;
     std::fs::create_dir_all(&settings.data_dir)?;
 
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
@@ -44,11 +48,16 @@ async fn main() -> anyhow::Result<()> {
     let app_state = Arc::new(api::AppState {
         data_dir: settings.data_dir,
         api_keys: tokio::sync::RwLock::new(api_keys),
+        envs: Default::default(),
     });
 
     let app = Router::new()
         .route("/", get(web::index))
-        .route("/upload", post(web::upload))
+        .route("/upload", post(web::upload).layer(DefaultBodyLimit::max(MAX_WASM_SIZE)))
+        .route(
+            "/api/:program_id/program",
+            put(api::update_program).layer(DefaultBodyLimit::max(MAX_WASM_SIZE)),
+        )
         .route("/api/:program_id/entry", post(api::entry))
         .route("/api/:program_id/state", get(api::state))
         .route("/api/:program_id/entries", get(api::entries))

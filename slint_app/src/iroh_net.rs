@@ -4,6 +4,7 @@ use std::{
     sync::{mpsc::Receiver, mpsc::Sender, mpsc, Arc},
     thread,
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use iroh::{
     endpoint::{Connection, presets},
@@ -31,13 +32,13 @@ pub enum Event {
 }
 
 pub struct Handle {
-    pub cmd_tx: Sender<Cmd>,
+    pub cmd_tx: UnboundedSender<Cmd>,
     pub node_id: String,
 }
 
 pub fn spawn(data_dir: PathBuf) -> (Handle, Receiver<Event>) {
-    let (cmd_tx, cmd_rx) = mpsc::channel();
-    let (evt_tx, evt_rx) = mpsc::channel();
+    let (cmd_tx, cmd_rx) = unbounded_channel();
+    let (evt_tx, evt_rx) = mpsc::channel::<Event>();
 
     let key_dir = data_dir.join("iroh");
     std::fs::create_dir_all(&key_dir).ok();
@@ -70,7 +71,7 @@ pub fn spawn(data_dir: PathBuf) -> (Handle, Receiver<Event>) {
 
 type Peers = Arc<Mutex<HashMap<String, Connection>>>;
 
-async fn run(secret: SecretKey, cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>) {
+async fn run(secret: SecretKey, mut cmd_rx: UnboundedReceiver<Cmd>, evt_tx: Sender<Event>) {
     let ep = match Endpoint::builder(presets::N0)
         .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
@@ -95,35 +96,31 @@ async fn run(secret: SecretKey, cmd_rx: Receiver<Cmd>, evt_tx: Sender<Event>) {
         let p = peers.clone();
         let evt = evt_tx.clone();
         tokio::spawn(async move {
-            loop {
-                match ep.accept().await {
-                    Some(incoming) => {
-                        eprintln!("iroh accept: got incoming connection");
-                        match incoming.await {
-                            Ok(conn) => {
-                                let peer_id = conn.remote_id().to_string();
-                                eprintln!("iroh accept: accepted connection from {peer_id}");
-                                let mut map = p.lock().await;
-                                map.insert(peer_id.clone(), conn.clone());
-                                drop(map);
-                                evt.send(Event::PeerConnected(peer_id.clone())).ok();
-                                recv_loop(conn, peer_id, p.clone(), evt.clone());
-                            }
-                            Err(e) => {
-                                eprintln!("iroh accept: failed: {e}");
-                                evt.send(Event::Error(format!("accept: {e}")))
-                                    .ok();
-                            }
+            while let Some(incoming) = ep.accept().await {
+                // handshake in its own task so one slow peer doesn't block the others
+                let p = p.clone();
+                let evt = evt.clone();
+                tokio::spawn(async move {
+                    match incoming.await {
+                        Ok(conn) => {
+                            let peer_id = conn.remote_id().to_string();
+                            eprintln!("iroh accept: accepted connection from {peer_id}");
+                            p.lock().await.insert(peer_id.clone(), conn.clone());
+                            evt.send(Event::PeerConnected(peer_id.clone())).ok();
+                            recv_loop(conn, peer_id, p, evt);
+                        }
+                        Err(e) => {
+                            eprintln!("iroh accept: failed: {e}");
+                            evt.send(Event::Error(format!("accept: {e}"))).ok();
                         }
                     }
-                    None => break,
-                }
+                });
             }
         });
     }
 
     // Command loop
-    while let Ok(cmd) = cmd_rx.recv() {
+    while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Cmd::ConnectPeer(peer_id) => {
                 eprintln!("iroh cmd: connect to {peer_id}");
@@ -222,7 +219,11 @@ async fn broadcast_entry(peers: &Peers, entry: &Entry, evt_tx: &Sender<Event>) {
     for (peer_id, conn) in &conns {
         match conn.open_uni().await {
             Ok(mut send) => {
-                if let Err(e) = send.write_all(&data).await {
+                let sent = match send.write_all(&data).await {
+                    Ok(()) => send.finish().map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                if let Err(e) = sent {
                     eprintln!("send to {peer_id}: {e}");
                     dead.push(peer_id.clone());
                 }

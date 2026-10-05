@@ -1,6 +1,38 @@
-import { Card, EntryEdit } from "../components.slint";
-import { ComboBox, LineEdit, Button } from "std-widgets.slint";
+import { Card } from "../components/card.slint";
+import { EntryEdit, KeyValue } from "../components/entry_edit.slint";
 
 export component NewEntry inherits VerticalLayout {
-    EntryEdit { }
+    in property <[string]> kinds;
+    in property <string> error;
+    in-out property <string> kind;
+    in-out property <string> when;
+    in-out property <[KeyValue]> values;
+
+    callback kind_selected(string);
+    callback add_row();
+    callback remove_row(int);
+    callback submit();
+
+    Card {
+        title: "New Entry";
+        EntryEdit {
+            kinds: root.kinds;
+            error: root.error;
+            kind <=> root.kind;
+            when <=> root.when;
+            values <=> root.values;
+            kind_selected(k) => {
+                root.kind_selected(k);
+            }
+            add_row => {
+                root.add_row();
+            }
+            remove_row(i) => {
+                root.remove_row(i);
+            }
+            submit => {
+                root.submit();
+            }
+        }
+    }
 }

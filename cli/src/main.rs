@@ -1,14 +1,8 @@
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
-use ribolita::{EntriesDatabase, Query, ReadTransaction, StateDatabase, StateLMDBDatabase};
-use ribolita_common::{
-    entry::Entry,
-    key::{self},
-    rmp_json,
-    state::State,
-    value,
-};
+use ribolita::{EntriesMdbxDatabase, EntriesStore, Query, RunEnvironment, StateLMDBDatabase};
+use ribolita_common::{entry::Entry, rmp_json};
 use std::io::Write;
 
 mod editable_entry;
@@ -67,10 +61,23 @@ enum Commands {
         #[arg(long, default_value = "yaml")]
         format: String,
 
-        // --edit invokes a text editor
+        /// open the entries in a text editor and save the changes (replays state if --filename is given)
         #[arg(long)]
         edit: bool,
     },
+    /// rebuild the state from scratch by running every entry through the program again
+    Replay,
+}
+
+type Env = RunEnvironment<StateLMDBDatabase, EntriesMdbxDatabase>;
+
+fn load_env(cli: &Cli) -> anyhow::Result<Env> {
+    let filename = cli
+        .filename
+        .as_ref()
+        .ok_or_else(|| anyhow!("--filename (the .wasm program) is required for this command"))?;
+    let wasm = std::fs::read(filename)?;
+    Ok(RunEnvironment::new(&cli.dir, &wasm)?)
 }
 
 fn parse_key_val(s: &str) -> Result<(String, rmpv::Value), anyhow::Error> {
@@ -88,11 +95,12 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Entry { when, kind, data } => {
-            let filename = cli
-                .filename
-                .as_ref()
-                .ok_or_else(|| anyhow!("filename is required for entry command"))?;
+        Commands::Entry {
+            ref when,
+            ref kind,
+            ref data,
+        } => {
+            let when = *when;
             let when = when.unwrap_or_else(|| {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -102,27 +110,19 @@ fn main() -> anyhow::Result<()> {
             let entry = Entry {
                 id: 0,
                 when,
-                kind,
-                values: data,
+                kind: kind.clone(),
+                values: data.clone(),
             };
 
-            let b = std::fs::read(filename)?;
-            let mut env: ribolita::RunEnvironment<StateLMDBDatabase> =
-                ribolita::RunEnvironment::new(&cli.dir, &b)?;
-            env.run(entry)?;
+            let id = load_env(&cli)?.run(entry)?;
+            writeln!(std::io::stderr(), "added entry:{id}")?;
         }
-        Commands::State { path } => {
-            let state_dir = cli.dir.join("state");
-            let state_db = StateLMDBDatabase::init(&state_dir).map_err(|e| anyhow!(e))?;
-            let txn = state_db.start_read_txn()?;
-
-            let path_parts = path.as_ref().map(|s| key::parse(s)).unwrap_or_default();
-            let prefix = key::to_bytes(&path_parts);
-
-            let (num_rows, data) = txn.get(&prefix)?;
-            let state: State = value::from_bytes(num_rows, &data)?;
-
-            let json_value = rmp_json::rmp_value_to_json_value(&state.0);
+        Commands::Replay => {
+            let count = load_env(&cli)?.replay()?;
+            writeln!(std::io::stderr(), "replayed {count} entries")?;
+        }
+        Commands::State { ref path } => {
+            let json_value = load_env(&cli)?.state_json(path.as_deref().unwrap_or(""))?;
             writeln!(
                 std::io::stdout(),
                 "{}",
@@ -130,15 +130,15 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         Commands::Entries {
-            id,
+            ref id,
             since,
             last,
-            format,
+            ref format,
             edit,
         } => {
+            let id = id.clone();
             let entries_dir = cli.dir.join("entries");
-            let entries_db = EntriesDatabase::init(&entries_dir).map_err(|e| anyhow!(e))?;
-            let txn = entries_db.start_write_txn()?;
+            let entries_db = EntriesMdbxDatabase::init(&entries_dir).map_err(|e| anyhow!(e))?;
 
             let query = if !id.is_empty() {
                 Query::ByIds(id)
@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
                     limit: last,
                 }
             };
-            let entries = entries_db.query(&txn, query).map_err(|e| anyhow!(e))?;
+            let entries = entries_db.query(query)?;
 
             // serialize the entries in a format that can be edited as text
             let mut editable_entries: Vec<EditableEntry> =
@@ -198,14 +198,25 @@ fn main() -> anyhow::Result<()> {
                     })
                     .collect();
 
-                // now update the database with the edited ones
-                for entry in edited_entries {
-                    entries_db
-                        .save(&txn, entry.id, &entry)
-                        .map_err(|e| anyhow!(e))?;
+                // now update the database with the edited ones; the state was derived from the old
+                // entries, so it has to be rebuilt
+                let edited_refs: Vec<&Entry> = edited_entries.iter().collect();
+                if !edited_entries.is_empty() {
+                    if cli.filename.is_some() {
+                        drop(entries_db); // the environment opens its own handle
+                        let count = load_env(&cli)?.update_entries(&edited_refs)?;
+                        writeln!(std::io::stderr(), "replayed {count} entries")?;
+                    } else {
+                        entries_db.save(&edited_refs)?;
+                        writeln!(
+                            std::io::stderr(),
+                            "state is now stale: run `replay --filename <program.wasm>`"
+                        )?;
+                    }
+                }
+                for entry in &edited_entries {
                     writeln!(std::io::stderr(), "updated entry:{}", entry.id)?;
                 }
-                txn.commit()?;
             } else {
                 writeln!(std::io::stdout(), "{}", serialized)?;
             }

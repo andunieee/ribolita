@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use ribolita_common::{entry::Entry, key::KeyPart, key_path, value};
 use rmpv::Value;
-use std::collections::HashMap;
 
 use ribolita_wasm_shared::{
     StateError, logger::Logger, return_err, state_get, state_push, state_set,
@@ -36,7 +35,7 @@ pub unsafe extern "C" fn process(entry_ptr: *const u8, entry_len: usize) {
 #[allow(dead_code)]
 struct State {
     sales: Vec<Sale>,
-    items: HashMap<u32, Item>,
+    items: Vec<Item>,
     next_item: u32,
 }
 
@@ -78,16 +77,15 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                     "name" => match value {
                         Value::String(s) => {
                             // grab name
-                            name = Some(s.to_string());
+                            name = s.as_str().map(str::to_string);
                         }
-                        _ => anyhow::bail!("invalid price type"),
+                        _ => anyhow::bail!("invalid name type"),
                     },
-                    _ => anyhow::bail!("blep"),
+                    other => anyhow::bail!("unexpected item field '{other}'"),
                 }
             }
 
             if let (Some(price), Some(name)) = (price, name) {
-                state_set(key_path!("items"), Item { price, name })?;
                 let next_item = match state_get::<u32>(key_path!("next_item")) {
                     Ok(v) => v,
                     Err(StateError::StateDeserialize(value::Error::EndOfRows)) => 0,
@@ -95,6 +93,7 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                         return Err(err)?;
                     }
                 };
+                state_set(key_path!("items", next_item), Item { price, name })?;
                 state_set(key_path!("next_item"), next_item + 1)?;
             } else if price.is_none() {
                 anyhow::bail!("invalid item registration: missing price");
@@ -123,12 +122,16 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                             for (k, v) in map {
                                 match k.as_str() {
                                     Some("id") => {
-                                        sale_entry.item_ref =
-                                            v.as_u64().expect("id must be integer") as u32;
+                                        sale_entry.item_ref = v
+                                            .as_u64()
+                                            .ok_or_else(|| anyhow!("id must be integer"))?
+                                            as u32;
                                     }
                                     Some("quantity") => {
-                                        sale_entry.quantity =
-                                            v.as_u64().expect("quantity must be integer") as u32
+                                        sale_entry.quantity = v
+                                            .as_u64()
+                                            .ok_or_else(|| anyhow!("quantity must be integer"))?
+                                            as u32
                                     }
                                     _ => anyhow::bail!("unexpected field"),
                                 }
@@ -136,7 +139,11 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                             if let Ok(item) =
                                 state_get::<Item>(key_path!("items", sale_entry.item_ref))
                             {
-                                sale.revenue += item.price
+                                sale.revenue = item
+                                    .price
+                                    .checked_mul(sale_entry.quantity)
+                                    .and_then(|total| sale.revenue.checked_add(total))
+                                    .ok_or_else(|| anyhow!("sale total overflows"))?;
                             } else {
                                 anyhow::bail!("item not found");
                             }
@@ -146,8 +153,12 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                         _ => anyhow::bail!("item must be mapping"),
                     },
                     "actual_paid" => {
-                        actual_paid =
-                            Some(value.as_u64().expect("actual_paid must be integer") as u32);
+                        actual_paid = Some(
+                            value
+                                .as_u64()
+                                .ok_or_else(|| anyhow!("actual_paid must be integer"))?
+                                as u32,
+                        );
                     }
                     _ => anyhow::bail!("unexpected value"),
                 }
@@ -157,7 +168,7 @@ fn update(entry: &Entry) -> Result<(), anyhow::Error> {
                 sale.discount = sale
                     .revenue
                     .checked_sub(actual)
-                    .expect("discount larger than total amount");
+                    .ok_or_else(|| anyhow!("paid more than the total amount"))?;
                 sale.revenue = actual;
                 state_push(key_path!("sales"), sale)?;
             } else {

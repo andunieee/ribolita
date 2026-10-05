@@ -8,6 +8,8 @@ pub fn json_value_to_rmp_value(jval: &serde_json::Value) -> rmpv::Value {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 rmpv::Value::Integer(i.into())
+            } else if let Some(u) = n.as_u64() {
+                rmpv::Value::Integer(u.into())
             } else if let Some(f) = n.as_f64() {
                 rmpv::Value::F64(f)
             } else {
@@ -38,6 +40,8 @@ pub fn rmp_value_to_json_value(mpval: &rmpv::Value) -> serde_json::Value {
         rmpv::Value::Integer(i) => {
             if let Some(i64_val) = i.as_i64() {
                 serde_json::Value::Number(serde_json::Number::from(i64_val))
+            } else if let Some(u64_val) = i.as_u64() {
+                serde_json::Value::Number(serde_json::Number::from(u64_val))
             } else {
                 serde_json::Value::Number(serde_json::Number::from(0))
             }

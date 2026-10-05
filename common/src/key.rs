@@ -20,17 +20,30 @@ macro_rules! key_path {
     };
 }
 
-pub fn parse<'s>(s: &'s str) -> Vec<KeyPart<'s>> {
+/// Parses a dotted path like `"items.3.name"`. An empty string is the root path.
+pub fn parse<'s>(s: &'s str) -> Result<Vec<KeyPart<'s>>, FieldTooLong> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
     s.split('.')
         .map(|part| {
             if let Ok(num) = part.parse::<u32>() {
-                KeyPart::Index(num)
+                Ok(KeyPart::Index(num))
+            } else if part.len() > MAX_FIELD_LEN {
+                Err(FieldTooLong(part.to_string()))
             } else {
-                KeyPart::Field(part)
+                Ok(KeyPart::Field(part))
             }
         })
         .collect()
 }
+
+/// Field names are length-prefixed with 7 bits.
+pub const MAX_FIELD_LEN: usize = 127;
+
+#[derive(thiserror::Error, Debug)]
+#[error("key field '{0}' is longer than {MAX_FIELD_LEN} bytes")]
+pub struct FieldTooLong(pub String);
 
 const FIELD: u8 = 1;
 const INDEX: u8 = 0;
@@ -48,8 +61,8 @@ pub fn measure_part(part: &KeyPart) -> usize {
     match part {
         KeyPart::Field(str) => {
             let size = 1 + str.len();
-            if str.len() > 127 {
-                panic!("string key can't be bigger than 127");
+            if str.len() > MAX_FIELD_LEN {
+                panic!("string key can't be bigger than {MAX_FIELD_LEN}");
             }
             size
         }
@@ -276,7 +289,10 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        let result = parse("field.123.another");
+        assert_eq!(parse("").unwrap(), vec![]);
+        assert!(parse(&"x".repeat(128)).is_err());
+
+        let result = parse("field.123.another").unwrap();
         assert_eq!(
             result,
             vec![
@@ -286,7 +302,7 @@ mod tests {
             ]
         );
 
-        let result2 = parse("0.hello.456");
+        let result2 = parse("0.hello.456").unwrap();
         assert_eq!(
             result2,
             vec![

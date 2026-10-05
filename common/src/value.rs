@@ -361,65 +361,81 @@ impl<'de: 'b, 'b> de::MapAccess<'de> for MapDeserializer<'de, 'b> {
     }
 }
 
-/// bytes should be in the layout [num_rows][[key_len][val_len][key][val] * num_rows]
-pub fn from_bytes<'de, T: serde::Deserialize<'de>>(
-    num_rows: usize,
-    data: &'de [u8],
-) -> Result<T, Error> {
-    // supported layouts:
-    // - "db layout":   [u32 row_count][[u16 key_len][u32 val_len] * num_rows][[key][val] * num_rows]
-    // - "host layout":                [[u16 key_len][u32 val_len] * num_rows][[key][val] * num_rows]
+/// A `(key, value)` row borrowed from a row blob.
+pub type RowRef<'a> = (&'a [u8], &'a [u8]);
 
-    let mut start = 0;
-    if data.len() >= ROW_COUNT_BYTES {
-        let maybe_rows = u32::from_le_bytes(data[0..ROW_COUNT_BYTES].try_into().unwrap()) as usize;
-        if maybe_rows == num_rows
-            && data.len() >= ROW_COUNT_BYTES + num_rows * (KEY_LEN_BYTES + VAL_LEN_BYTES)
-        {
-            start = ROW_COUNT_BYTES;
-        }
-    }
+/// Splits a row blob in the layout
+/// `[u32 row_count][[u16 key_len][u32 val_len] * row_count][[key][val] * row_count]`
+/// into `(key, value)` slices, validating every length against the buffer.
+pub fn split_rows(data: &[u8]) -> Result<Vec<RowRef<'_>>, Error> {
+    let count_bytes = data.get(0..ROW_COUNT_BYTES).ok_or(Error::InvalidBytes)?;
+    let num_rows = u32::from_le_bytes(count_bytes.try_into().unwrap()) as usize;
 
     let header_stride = KEY_LEN_BYTES + VAL_LEN_BYTES;
-    let headers_len = num_rows
+    let data_start = num_rows
         .checked_mul(header_stride)
+        .and_then(|len| len.checked_add(ROW_COUNT_BYTES))
         .ok_or(Error::InvalidBytes)?;
-    let data_start = start.checked_add(headers_len).ok_or(Error::InvalidBytes)?;
     if data.len() < data_start {
         return Err(Error::InvalidBytes);
     }
 
-    let mut lengths = Vec::with_capacity(num_rows);
-    let mut pos = start;
-    for _ in 0..num_rows {
-        let key_len =
-            u16::from_le_bytes(data[pos..pos + KEY_LEN_BYTES].try_into().unwrap()) as usize;
-        pos += KEY_LEN_BYTES;
-
-        let val_len =
-            u32::from_le_bytes(data[pos..pos + VAL_LEN_BYTES].try_into().unwrap()) as usize;
-        pos += VAL_LEN_BYTES;
-
-        lengths.push((key_len, val_len));
-    }
-
     let mut rows = Vec::with_capacity(num_rows);
+    let mut header_pos = ROW_COUNT_BYTES;
     let mut data_pos = data_start;
-    for (key_len, val_len) in lengths {
+    for _ in 0..num_rows {
+        let key_len = u16::from_le_bytes(
+            data[header_pos..header_pos + KEY_LEN_BYTES]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        header_pos += KEY_LEN_BYTES;
+        let val_len = u32::from_le_bytes(
+            data[header_pos..header_pos + VAL_LEN_BYTES]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        header_pos += VAL_LEN_BYTES;
+
         let key_end = data_pos.checked_add(key_len).ok_or(Error::InvalidBytes)?;
         let val_end = key_end.checked_add(val_len).ok_or(Error::InvalidBytes)?;
         if val_end > data.len() {
             return Err(Error::InvalidBytes);
         }
 
-        let key = &data[data_pos..key_end];
-        let val = &data[key_end..val_end];
+        rows.push((&data[data_pos..key_end], &data[key_end..val_end]));
         data_pos = val_end;
-
-        rows.push((key, val));
     }
 
-    from_rows(rows.as_slice())
+    Ok(rows)
+}
+
+/// Serializes `(key, value)` rows into the layout read by [`split_rows`].
+pub fn join_rows<K: AsRef<[u8]>, V: AsRef<[u8]>>(rows: &[(K, V)]) -> Vec<u8> {
+    let payload: usize = rows
+        .iter()
+        .map(|(k, v)| k.as_ref().len() + v.as_ref().len())
+        .sum();
+    let mut data = Vec::with_capacity(
+        ROW_COUNT_BYTES + rows.len() * (KEY_LEN_BYTES + VAL_LEN_BYTES) + payload,
+    );
+
+    data.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+    for (key, value) in rows {
+        data.extend_from_slice(&(key.as_ref().len() as u16).to_le_bytes());
+        data.extend_from_slice(&(value.as_ref().len() as u32).to_le_bytes());
+    }
+    for (key, value) in rows {
+        data.extend_from_slice(key.as_ref());
+        data.extend_from_slice(value.as_ref());
+    }
+
+    data
+}
+
+/// Deserializes a row blob (see [`split_rows`]) into `T`.
+pub fn from_bytes<'de, T: serde::Deserialize<'de>>(data: &'de [u8]) -> Result<T, Error> {
+    from_rows(split_rows(data)?.as_slice())
 }
 
 pub fn from_rows<'de, T: serde::Deserialize<'de>>(
@@ -1545,5 +1561,21 @@ mod tests {
                 .collect::<Vec<SerializedRow>>(),
             serialized
         );
+    }
+
+    #[test]
+    fn test_split_join_rows() {
+        let rows = vec![(vec![1u8, 2], vec![3u8]), (vec![], vec![4u8, 5, 6])];
+        let blob = join_rows(&rows);
+        let split = split_rows(&blob).unwrap();
+        assert_eq!(split, vec![(&[1u8, 2][..], &[3u8][..]), (&[][..], &[4u8, 5, 6][..])]);
+
+        // every truncation must be rejected rather than panic
+        for len in 0..blob.len() {
+            assert!(split_rows(&blob[..len]).is_err());
+        }
+
+        // absurd row counts must not overflow
+        assert!(split_rows(&u32::MAX.to_le_bytes()).is_err());
     }
 }

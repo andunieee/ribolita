@@ -1,10 +1,8 @@
 use libmdbx::{Database, NoWriteMap, RO, RW, Transaction, TransactionKind, WriteFlags};
-use std::collections::VecDeque;
 
 use crate::{
     StateDatabase,
-    database::{ReadTransaction, WriteTransaction},
-    state_db::{deserialize_rows, serialize_rows},
+    database::{ReadTransaction, Row, WriteTransaction},
 };
 
 pub struct StateLMDBDatabase {
@@ -22,14 +20,12 @@ pub struct MdbxWriteTransaction<'db> {
     txn: Transaction<'db, RW, NoWriteMap>,
 }
 
-fn get<K: TransactionKind>(
+fn scan<K: TransactionKind>(
     txn: &Transaction<'_, K, NoWriteMap>,
     prefix: &[u8],
-) -> anyhow::Result<(usize, Vec<u8>)> {
+) -> anyhow::Result<Vec<Row>> {
     let state_table = txn.open_table(Some("state"))?;
     let cursor = txn.cursor(&state_table)?;
-
-    let mut rows = Vec::new();
 
     let iter = if prefix.is_empty() {
         cursor.into_iter_start::<Vec<u8>, Vec<u8>>()
@@ -37,91 +33,43 @@ fn get<K: TransactionKind>(
         cursor.into_iter_from::<Vec<u8>, Vec<u8>>(prefix)
     };
 
+    let mut rows = Vec::new();
     for result in iter {
         let (key, value): (Vec<u8>, Vec<u8>) = result?;
         if !key.starts_with(prefix) {
             break;
         }
-
-        let rel_path = &key[prefix.len()..];
-        rows.push((rel_path.to_vec(), value));
+        rows.push((key, value));
     }
 
-    let serialized_data = serialize_rows(&rows);
-    Ok((rows.len(), serialized_data))
+    Ok(rows)
 }
 
 impl<'db> ReadTransaction for MdbxReadTransaction<'db> {
-    fn get(&self, prefix: &[u8]) -> anyhow::Result<(usize, Vec<u8>)> {
-        get(&self.txn, prefix)
+    fn scan(&self, prefix: &[u8]) -> anyhow::Result<Vec<Row>> {
+        scan(&self.txn, prefix)
     }
 }
 
 impl<'db> ReadTransaction for MdbxWriteTransaction<'db> {
-    fn get(&self, prefix: &[u8]) -> anyhow::Result<(usize, Vec<u8>)> {
-        get(&self.txn, prefix)
+    fn scan(&self, prefix: &[u8]) -> anyhow::Result<Vec<Row>> {
+        scan(&self.txn, prefix)
     }
 }
 
 impl<'db> WriteTransaction for MdbxWriteTransaction<'db> {
-    fn set(&self, key_base: &[u8], data: &[u8]) -> anyhow::Result<()> {
+    fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         let state_table = self.txn.open_table(Some("state"))?;
-        let cursor = self.txn.cursor(&state_table)?;
+        self.txn
+            .put(&state_table, key, value, WriteFlags::empty())?;
+        Ok(())
+    }
 
-        let new_rows = deserialize_rows(data);
-        let mut new_rows = VecDeque::from(new_rows.into_iter().collect::<Vec<_>>());
-
-        // First, collect all existing keys and values that match the prefix
-        let mut existing_entries = Vec::new();
-        {
-            let iter = if key_base.is_empty() {
-                cursor.into_iter_start::<Vec<u8>, Vec<u8>>()
-            } else {
-                cursor.into_iter_from::<Vec<u8>, Vec<u8>>(key_base)
-            };
-
-            for result in iter {
-                let (key, existing_value): (Vec<u8>, Vec<u8>) = result?;
-                if !key.starts_with(key_base) {
-                    break;
-                }
-                existing_entries.push((key, existing_value));
-            }
-        }
-
-        // Now process the collected entries
+    fn delete_prefix(&self, prefix: &[u8]) -> anyhow::Result<()> {
         let state_table = self.txn.open_table(Some("state"))?;
-
-        for (key, existing_value) in existing_entries {
-            let rel_path = &key[key_base.len()..];
-
-            if let Some((i, new_value)) = new_rows.iter().enumerate().find_map(|(i, (rk, val))| {
-                if *rk == rel_path {
-                    Some((i, val))
-                } else {
-                    None
-                }
-            }) {
-                // row exists, update if value is different
-                if existing_value != *new_value {
-                    self.txn
-                        .put(&state_table, &key, new_value, WriteFlags::empty())?;
-                }
-                // remove from new_rows as it's handled
-                new_rows.swap_remove_front(i);
-            } else {
-                // row doesn't exist in new data => delete it
-                self.txn.del(&state_table, &key, None)?;
-            }
+        for (key, _) in scan(&self.txn, prefix)? {
+            self.txn.del(&state_table, &key, None)?;
         }
-
-        // all remaining rows in new_rows are new => insert them
-        for (rel_path, new_value) in new_rows {
-            let full_key = [key_base, rel_path].concat();
-            self.txn
-                .put(&state_table, &full_key, new_value, WriteFlags::empty())?;
-        }
-
         Ok(())
     }
 

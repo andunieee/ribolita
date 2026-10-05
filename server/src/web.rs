@@ -43,7 +43,7 @@ pub(crate) async fn upload(
     let program_id = program_id
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request("program_id is required"))?;
-    if !is_valid_program_id(&program_id) {
+    if !programs::is_valid_program_id(&program_id) {
         return Err(ApiError::bad_request(
             "program_id must be alphanumeric with - or _ only",
         ));
@@ -61,9 +61,7 @@ pub(crate) async fn upload(
 
     std::fs::create_dir_all(&program_dir)
         .map_err(|e| ApiError::internal(format!("failed to create program dir: {e}")))?;
-    let wasm_path = programs::program_wasm_path(&program_dir);
-    std::fs::write(&wasm_path, &wasm_bytes)
-        .map_err(|e| ApiError::internal(format!("failed to write program.wasm: {e}")))?;
+    programs::write_wasm(&program_dir, &wasm_bytes)?;
 
     let api_key = programs::generate_api_key();
     programs::write_api_key(&program_dir, &api_key)?;
@@ -76,12 +74,6 @@ pub(crate) async fn upload(
     let programs = programs::list_programs(&state.data_dir)?;
     let markup = render_index(&programs, Some(&api_key), Some(&program_id));
     Ok(Html(markup.into_string()))
-}
-
-fn is_valid_program_id(program_id: &str) -> bool {
-    program_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn render_index(

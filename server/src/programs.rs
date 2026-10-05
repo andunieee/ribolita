@@ -49,7 +49,18 @@ pub(crate) fn list_programs(data_dir: &Path) -> Result<Vec<ProgramSummary>, ApiE
     Ok(programs)
 }
 
+pub(crate) fn is_valid_program_id(program_id: &str) -> bool {
+    !program_id.is_empty()
+        && program_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub(crate) fn load_program(data_dir: &Path, program_id: &str) -> Result<Program, ApiError> {
+    // ids come from URL paths, where `%2F` decodes to `/`
+    if !is_valid_program_id(program_id) {
+        return Err(ApiError::not_found("program not found"));
+    }
     let dir = data_dir.join(program_id);
     if !dir.is_dir() {
         return Err(ApiError::not_found("program not found"));
@@ -83,6 +94,14 @@ pub(crate) fn load_api_key_for_program(
 
 pub(crate) fn program_wasm_path(program_dir: &Path) -> PathBuf {
     program_dir.join(PROGRAM_WASM_FILE)
+}
+
+/// Writes `program.wasm` atomically, so a crash never leaves a truncated module behind.
+pub(crate) fn write_wasm(program_dir: &Path, wasm: &[u8]) -> Result<(), ApiError> {
+    let tmp_path = program_dir.join(format!("{PROGRAM_WASM_FILE}.tmp"));
+    std::fs::write(&tmp_path, wasm)
+        .and_then(|_| std::fs::rename(&tmp_path, program_wasm_path(program_dir)))
+        .map_err(|e| ApiError::internal(format!("failed to write program.wasm: {e}")))
 }
 
 pub(crate) fn api_key_path(program_dir: &Path) -> PathBuf {

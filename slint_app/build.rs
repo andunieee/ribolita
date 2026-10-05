@@ -14,18 +14,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROGRAM");
     println!("cargo:rerun-if-changed={}", wasm_path.display());
 
-    let bytes = std::fs::read(&wasm_path).expect("failed to read WASM file");
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let dest = PathBuf::from(&out_dir).join("embedded_wasm.rs");
-    let mut data = String::from("static WASM: &[u8] = &[");
-    for (i, b) in bytes.iter().enumerate() {
-        if i % 16 == 0 {
-            data.push('\n');
-        }
-        data.push_str(&format!("{b},"));
-    }
-    data.push_str("\n];\n");
-    std::fs::write(&dest, data).expect("failed to write embedded WASM");
+    let wasm_abs = std::fs::canonicalize(&wasm_path).expect("failed to resolve WASM path");
+    std::fs::write(
+        &dest,
+        format!("static WASM: &[u8] = include_bytes!({:?});\n", wasm_abs),
+    )
+    .expect("failed to write embedded WASM");
 
     let metadata_path_str = std::env::var("PROGRAM_METADATA")
         .expect("PROGRAM_METADATA env var must point to a metadata.json file");
@@ -49,8 +45,8 @@ fn main() {
             for (name, info) in kinds {
                 let field_count = info
                     .get("values")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.len())
+                    .and_then(|v| v.as_object())
+                    .map(|o| o.len())
                     .unwrap_or(0);
                 let desc = info
                     .get("description")

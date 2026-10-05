@@ -1,15 +1,10 @@
-import {
-    Button,
-    ComboBox,
-    LineEdit,
-    ScrollView,
-    TextEdit,
-} from "std-widgets.slint";
 import { StateViewer } from "views/state_viewer.slint";
 import { NewEntry } from "views/new_entry.slint";
 import { Entries } from "views/entries.slint";
 import { Config } from "views/config.slint";
-import { Entry } from "components/entry_edit.slint";
+import { EntrySummary, KeyValue } from "components/entry_edit.slint";
+
+export { EntrySummary, KeyValue }
 
 export component AppWindow inherits Window {
     min-width: 360px;
@@ -21,22 +16,42 @@ export component AppWindow inherits Window {
 
     property <int> active_tab;
 
+    in-out property <string> state_path;
     in property <string> state_json;
     in property <string> state_error;
 
     in property <[string]> kind_names;
 
-    in property <[Entry]> entries;
+    in-out property <string> new_entry_kind;
+    in-out property <string> new_entry_when;
+    in-out property <[KeyValue]> new_entry_values;
+    in property <string> new_entry_error;
+
+    in property <[EntrySummary]> entries;
     in property <string> entries_error;
+    in property <int> selected_entry_index: -1;
+    in-out property <string> entry_kind;
+    in-out property <string> entry_when;
+    in-out property <[KeyValue]> entry_values;
+    in property <string> entry_editor_error;
 
     in property <string> data_dir;
     in property <string> node_id;
-    in property <string> peer_connect_input;
+    in-out property <string> peer_connect_input;
     in property <[string]> connected_peers;
 
     callback refresh_state();
-    callback connect_peer();
+    callback new_entry_kind_selected(string);
+    callback add_new_entry_row();
+    callback remove_new_entry_row(int);
+    callback submit_new_entry();
+    callback refresh_entries();
+    callback select_entry(int);
+    callback entry_kind_selected(string);
+    callback add_entry_row();
+    callback remove_entry_row(int);
     callback save_entry();
+    callback connect_peer();
 
     Rectangle {
         background: @linear-gradient(180deg, #f7f3ee 0%, #ebe5dd 100%);
@@ -79,22 +94,45 @@ export component AppWindow inherits Window {
                     spacing: 14px;
 
                     if (root.active_tab == 0): StateViewer {
-                        json: state_json;
-                        error: state_error;
+                        path <=> root.state_path;
+                        json: root.state_json;
+                        error: root.state_error;
                         refresh_state => root.refresh_state();
                     }
 
-                    if (root.active_tab == 1): NewEntry { }
+                    if (root.active_tab == 1): NewEntry {
+                        kinds: root.kind_names;
+                        error: root.new_entry_error;
+                        kind <=> root.new_entry_kind;
+                        when <=> root.new_entry_when;
+                        values <=> root.new_entry_values;
+                        kind_selected(k) => root.new_entry_kind_selected(k);
+                        add_row => root.add_new_entry_row();
+                        remove_row(i) => root.remove_new_entry_row(i);
+                        submit => root.submit_new_entry();
+                    }
 
                     if (root.active_tab == 2): Entries {
                         entries: root.entries;
                         error: root.entries_error;
+                        selected_index: root.selected_entry_index;
+                        kinds: root.kind_names;
+                        edit_error: root.entry_editor_error;
+                        edit_kind <=> root.entry_kind;
+                        edit_when <=> root.entry_when;
+                        edit_values <=> root.entry_values;
+                        refresh => root.refresh_entries();
+                        select(i) => root.select_entry(i);
+                        kind_selected(k) => root.entry_kind_selected(k);
+                        add_row => root.add_entry_row();
+                        remove_row(i) => root.remove_entry_row(i);
+                        save => root.save_entry();
                     }
 
                     if (root.active_tab == 3): Config {
                         data_dir: root.data_dir;
                         node_id: root.node_id;
-                        peer_connect_input: root.peer_connect_input;
+                        peer_connect_input <=> root.peer_connect_input;
                         connected_peers: root.connected_peers;
                         connect_peer => root.connect_peer();
                     }

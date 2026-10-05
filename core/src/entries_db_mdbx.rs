@@ -1,14 +1,14 @@
 use ribolita_common::entry::Entry;
 use std::path::Path;
 
-use crate::entries_db::Query;
+use crate::entries_db::{EntriesStore, Query};
 
-pub struct EntriesDatabase {
+pub struct EntriesMdbxDatabase {
     db: libmdbx::Database<libmdbx::NoWriteMap>,
 }
 
-impl EntriesDatabase {
-    pub fn init(path: &Path) -> Result<EntriesDatabase, String> {
+impl EntriesMdbxDatabase {
+    fn open(path: &Path) -> Result<EntriesMdbxDatabase, String> {
         let db = libmdbx::Database::open_with_options(
             path,
             libmdbx::DatabaseOptions {
@@ -33,10 +33,10 @@ impl EntriesDatabase {
 
         txn.commit().map_err(|e| e.to_string())?;
 
-        Ok(EntriesDatabase { db })
+        Ok(EntriesMdbxDatabase { db })
     }
 
-    pub fn get_last_id<'txn, K: libmdbx::TransactionKind>(
+    fn get_last_id<'txn, K: libmdbx::TransactionKind>(
         &self,
         txn: &'txn libmdbx::Transaction<'txn, K, libmdbx::NoWriteMap>,
     ) -> anyhow::Result<u64> {
@@ -54,7 +54,7 @@ impl EntriesDatabase {
         }
     }
 
-    pub fn save<'txn>(
+    fn save<'txn>(
         &self,
         txn: &'txn libmdbx::Transaction<'txn, libmdbx::RW, libmdbx::NoWriteMap>,
         id: u64,
@@ -65,6 +65,15 @@ impl EntriesDatabase {
 
         let entries_table = txn.open_table(Some("entries"))?;
         let by_timestamp_table = txn.open_table(Some("by_timestamp"))?;
+
+        // drop the index row of the entry we're overwriting, its timestamp may have changed
+        if let Some(previous) = self.get(txn, id)? {
+            txn.del(
+                &by_timestamp_table,
+                previous.when.to_ne_bytes(),
+                Some(id_bytes.as_slice()),
+            )?;
+        }
 
         txn.put(
             &entries_table,
@@ -103,7 +112,7 @@ impl EntriesDatabase {
         }
     }
 
-    pub fn query<K: libmdbx::TransactionKind>(
+    fn query<K: libmdbx::TransactionKind>(
         &self,
         txn: &libmdbx::Transaction<'_, K, libmdbx::NoWriteMap>,
         query: Query,
@@ -179,18 +188,41 @@ impl EntriesDatabase {
         }
     }
 
-    pub fn start_write_txn(
+    fn start_write_txn(
         &self,
     ) -> anyhow::Result<libmdbx::Transaction<'_, libmdbx::RW, libmdbx::NoWriteMap>> {
         Ok(self.db.begin_rw_txn()?)
     }
 
-    pub fn start_read_txn(
+    fn start_read_txn(
         &self,
     ) -> anyhow::Result<libmdbx::Transaction<'_, libmdbx::RO, libmdbx::NoWriteMap>> {
         Ok(self.db.begin_ro_txn()?)
     }
 }
 
-unsafe impl Send for EntriesDatabase {}
-unsafe impl Sync for EntriesDatabase {}
+unsafe impl Send for EntriesMdbxDatabase {}
+unsafe impl Sync for EntriesMdbxDatabase {}
+
+impl EntriesStore for EntriesMdbxDatabase {
+    fn init(path: &Path) -> Result<Self, String> {
+        Self::open(path)
+    }
+
+    fn last_id(&self) -> anyhow::Result<u64> {
+        self.get_last_id(&self.start_read_txn()?)
+    }
+
+    fn save(&self, entries: &[&Entry]) -> anyhow::Result<()> {
+        let txn = self.start_write_txn()?;
+        for entry in entries {
+            EntriesMdbxDatabase::save(self, &txn, entry.id, entry)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    fn query(&self, query: Query) -> anyhow::Result<Vec<Entry>> {
+        EntriesMdbxDatabase::query(self, &self.start_read_txn()?, query)
+    }
+}

@@ -1,30 +1,78 @@
 use crate::{errors::ApiError, programs};
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, header::AUTHORIZATION},
 };
 use ribolita::{
-    EntriesDatabase, Query as EntriesQuery, ReadTransaction, RunEnvironment, StateDatabase,
+    EntriesMdbxDatabase, EntriesStore, Query as EntriesQuery, RunEnvironment, RunError,
     StateLMDBDatabase,
 };
 use ribolita_common::{
     entry::{Entry, EntryOutput, entry_to_json},
-    key, rmp_json,
-    state::State as StateValue,
-    value,
+    rmp_json,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tokio::sync::RwLock;
+
+type Env = RunEnvironment<StateLMDBDatabase, EntriesMdbxDatabase>;
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
     pub(crate) api_keys: RwLock<HashMap<String, String>>,
+    /// one open environment per program: databases can't be opened twice in a process, and
+    /// entries of a program must be processed one at a time
+    pub(crate) envs: Mutex<HashMap<String, Arc<Mutex<Env>>>>,
+}
+
+impl AppState {
+    fn env(&self, program_id: &str) -> Result<Arc<Mutex<Env>>, ApiError> {
+        let mut envs = self.envs.lock().unwrap();
+        if let Some(env) = envs.get(program_id) {
+            return Ok(env.clone());
+        }
+        let program = programs::load_program(&self.data_dir, program_id)?;
+        let wasm = std::fs::read(&program.wasm_path)
+            .map_err(|e| ApiError::internal(format!("failed to read wasm: {e}")))?;
+        let env = Env::new(&program.dir, &wasm).map_err(ApiError::internal_anyhow)?;
+        let env = Arc::new(Mutex::new(env));
+        envs.insert(program_id.to_string(), env.clone());
+        Ok(env)
+    }
+}
+
+/// Runs blocking work (wasm, database access) on a program's environment off the async runtime.
+async fn with_env<T: Send + 'static>(
+    state: Arc<AppState>,
+    program_id: String,
+    f: impl FnOnce(&mut Env) -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let env = state.env(&program_id)?;
+        let mut env = env.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut env)
+    })
+    .await
+    .map_err(ApiError::internal_anyhow)?
+}
+
+/// Failures caused by the program or the request are the client's problem, not the server's.
+fn run_error(err: RunError) -> ApiError {
+    match err {
+        RunError::WasmCall(_)
+        | RunError::WasmtimeShenanigans(_)
+        | RunError::BadWasm(_)
+        | RunError::MissingExport(_)
+        | RunError::MissingMemory
+        | RunError::Replay(..) => ApiError::bad_request(err.to_string()),
+        _ => ApiError::internal(err.to_string()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -36,8 +84,13 @@ pub struct EntryRequest {
 }
 
 #[derive(Serialize)]
-pub struct StatusResponse {
-    status: &'static str,
+pub struct EntryResponse {
+    id: u64,
+}
+
+#[derive(Serialize)]
+pub struct ProgramResponse {
+    replayed: usize,
 }
 
 pub(crate) async fn entry(
@@ -45,11 +98,8 @@ pub(crate) async fn entry(
     Path(program_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<EntryRequest>,
-) -> Result<Json<StatusResponse>, ApiError> {
+) -> Result<Json<EntryResponse>, ApiError> {
     authorize(&headers, &state, &program_id).await?;
-    let program = programs::load_program(&state.data_dir, &program_id)?;
-    let wasm = std::fs::read(&program.wasm_path)
-        .map_err(|e| ApiError::internal(format!("failed to read wasm: {e}")))?;
 
     let when = payload.when.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -70,11 +120,38 @@ pub(crate) async fn entry(
         values,
     };
 
-    let mut env: RunEnvironment<StateLMDBDatabase> =
-        RunEnvironment::new(&program.dir, &wasm).map_err(ApiError::internal_anyhow)?;
-    env.run(entry).map_err(ApiError::internal_anyhow)?;
+    let id = with_env(state, program_id, move |env| env.run(entry).map_err(run_error)).await?;
+    Ok(Json(EntryResponse { id }))
+}
 
-    Ok(Json(StatusResponse { status: "ok" }))
+/// Replaces the program's wasm module (raw request body) and rebuilds its state from the log.
+/// If any entry fails under the new module, the old one is kept and nothing changes.
+pub(crate) async fn update_program(
+    AxumState(state): AxumState<Arc<AppState>>,
+    Path(program_id): Path<String>,
+    headers: HeaderMap,
+    wasm: Bytes,
+) -> Result<Json<ProgramResponse>, ApiError> {
+    authorize(&headers, &state, &program_id).await?;
+    let program = programs::load_program(&state.data_dir, &program_id)?;
+    let old_wasm = std::fs::read(&program.wasm_path)
+        .map_err(|e| ApiError::internal(format!("failed to read wasm: {e}")))?;
+
+    let replayed = with_env(state, program_id, move |env| {
+        env.set_module(&wasm).map_err(run_error)?;
+        let replayed = match env.replay() {
+            Ok(count) => count,
+            Err(err) => {
+                env.set_module(&old_wasm).map_err(run_error)?;
+                return Err(run_error(err));
+            }
+        };
+        programs::write_wasm(&program.dir, &wasm)?;
+        Ok(replayed)
+    })
+    .await?;
+
+    Ok(Json(ProgramResponse { replayed }))
 }
 
 #[derive(Deserialize)]
@@ -89,25 +166,11 @@ pub(crate) async fn state(
     Query(query): Query<StateQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     authorize(&headers, &state, &program_id).await?;
-    let program = programs::load_program(&state.data_dir, &program_id)?;
-    let state_dir = program.dir.join("state");
-    std::fs::create_dir_all(&state_dir)
-        .map_err(|e| ApiError::internal(format!("failed to create state dir: {e}")))?;
-    let state_db = StateLMDBDatabase::init(&state_dir).map_err(ApiError::internal_anyhow)?;
-    let txn = state_db
-        .start_read_txn()
-        .map_err(ApiError::internal_anyhow)?;
-
-    let path_parts = query
-        .path
-        .as_ref()
-        .map(|s| key::parse(s))
-        .unwrap_or_default();
-    let prefix = key::to_bytes(&path_parts);
-    let (num_rows, data) = txn.get(&prefix).map_err(ApiError::internal_anyhow)?;
-    let state: StateValue =
-        value::from_bytes(num_rows, &data).map_err(ApiError::internal_anyhow)?;
-    let json_value = rmp_json::rmp_value_to_json_value(&state.0);
+    let path = query.path.unwrap_or_default();
+    let json_value = with_env(state, program_id, move |env| {
+        env.state_json(&path).map_err(ApiError::internal_anyhow)
+    })
+    .await?;
 
     Ok(Json(json_value))
 }
@@ -127,14 +190,6 @@ pub(crate) async fn entries(
     Query(query): Query<EntriesQueryParams>,
 ) -> Result<Json<Vec<EntryOutput>>, ApiError> {
     authorize(&headers, &state, &program_id).await?;
-    let program = programs::load_program(&state.data_dir, &program_id)?;
-    let entries_dir = program.dir.join("entries");
-    std::fs::create_dir_all(&entries_dir)
-        .map_err(|e| ApiError::internal(format!("failed to create entries dir: {e}")))?;
-    let entries_db = EntriesDatabase::init(&entries_dir).map_err(ApiError::internal_anyhow)?;
-    let txn = entries_db
-        .start_read_txn()
-        .map_err(ApiError::internal_anyhow)?;
 
     let query = if !query.id.is_empty() {
         EntriesQuery::ByIds(query.id)
@@ -146,9 +201,12 @@ pub(crate) async fn entries(
         }
     };
 
-    let entries = entries_db
-        .query(&txn, query)
-        .map_err(ApiError::internal_anyhow)?;
+    let entries = with_env(state, program_id, move |env| {
+        env.entries()
+            .query(query)
+            .map_err(ApiError::internal_anyhow)
+    })
+    .await?;
     let output = entries.into_iter().map(entry_to_json).collect();
 
     Ok(Json(output))
@@ -162,7 +220,7 @@ async fn authorize(
     let token = bearer_token(headers)
         .ok_or_else(|| ApiError::unauthorized("missing Authorization header"))?;
     let expected = get_or_load_api_key(state, program_id).await?;
-    if token != expected {
+    if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
         return Err(ApiError::unauthorized("invalid api key"));
     }
     Ok(())
@@ -180,6 +238,10 @@ async fn get_or_load_api_key(state: &AppState, program_id: &str) -> Result<Strin
         .await
         .insert(program_id.to_string(), api_key.clone());
     Ok(api_key)
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
