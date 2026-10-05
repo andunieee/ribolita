@@ -1,0 +1,16 @@
+[package]
+name = "ribolita_node"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+iroh = "0.98"
+ribolita = { path = "../core", default-features = false }
+ribolita_common = { path = "../common" }
+rmp-serde = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+rmpv = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["common", "core", "wasm_shared", "examples/*", "cli", "server", "slint_app"]
+members = ["common", "core", "wasm_shared", "examples/*", "cli", "server", "node", "slint_app"]
 
 [workspace.package]
 version = "0.1.0"
