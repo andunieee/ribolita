@@ -17,3 +17,4 @@ toml = "0.8"
 edit = "0.1"
 tempfile = "3.0"
 mimalloc = "0.1.47"
+ribolita_node = { path = "../node" }

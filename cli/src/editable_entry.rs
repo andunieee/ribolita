@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditableEntry {
-    pub id: u64,
+    /// the entry's id when it was loaded, used to match edits to entries
+    pub id: String,
+    /// when the event happened, in seconds since the unix epoch
     pub when: u64,
     pub kind: String,
     pub values: HashMap<String, serde_json::Value>,
@@ -15,6 +17,7 @@ pub struct EditableEntry {
 
 impl From<Entry> for EditableEntry {
     fn from(entry: Entry) -> Self {
+        let id = entry.id.to_string();
         let mut values: HashMap<String, serde_json::Value> =
             HashMap::with_capacity(entry.values.len());
 
@@ -47,7 +50,7 @@ impl From<Entry> for EditableEntry {
         }
 
         EditableEntry {
-            id: entry.id,
+            id,
             when: entry.when,
             kind: entry.kind,
             values,
@@ -66,62 +69,22 @@ impl PartialEq<EditableEntry> for EditableEntry {
     }
 }
 
-impl From<EditableEntry> for Entry {
-    fn from(val: EditableEntry) -> Self {
-        let mut values = Vec::with_capacity(val.values.len() * 2 - val.is_atomic.len());
-
-        for (k, v) in val.values {
-            let rmpval = rmp_json::json_value_to_rmp_value(&v);
-
-            if val.is_atomic.contains(&k) {
-                values.push((k, rmpval));
-            } else if let rmpv::Value::Array(rmpvals) = rmpval {
-                for rmpval in rmpvals {
-                    values.push((k.clone(), rmpval));
-                }
-            } else {
-                panic!("{:?} should have been an array", rmpval)
-            }
-        }
-
-        Entry {
-            id: val.id,
-            when: val.when,
-            kind: val.kind,
-            values,
-        }
-    }
-}
-
-impl From<&EditableEntry> for Entry {
-    fn from(val: &EditableEntry) -> Self {
-        let mut values = Vec::with_capacity(val.values.len() * 2 - val.is_atomic.len());
-
-        for (k, v) in val.values.iter() {
+impl EditableEntry {
+    /// The edited `when`, kind and values, with values that were split into arrays for editing
+    /// turned back into repeated keys.
+    pub fn to_parts(&self) -> (u64, String, Vec<(String, rmpv::Value)>) {
+        let mut values = Vec::with_capacity(self.values.len());
+        for (k, v) in self.values.iter() {
             let rmpval = rmp_json::json_value_to_rmp_value(v);
-
-            if val.is_atomic.contains(k) {
-                values.push((k.clone(), rmpval));
-            } else if let rmpv::Value::Array(rmpvals) = rmpval {
-                for rmpval in rmpvals {
-                    values.push((k.clone(), rmpval));
+            match rmpval {
+                rmpv::Value::Array(rmpvals) if !self.is_atomic.contains(k) => {
+                    for rmpval in rmpvals {
+                        values.push((k.clone(), rmpval));
+                    }
                 }
-            } else {
-                panic!("{:?} should have been an array", rmpval)
+                rmpval => values.push((k.clone(), rmpval)),
             }
         }
-
-        Entry {
-            id: val.id,
-            when: val.when,
-            kind: val.kind.clone(),
-            values,
-        }
-    }
-}
-
-impl From<&mut EditableEntry> for Entry {
-    fn from(val: &mut EditableEntry) -> Self {
-        (val as &EditableEntry).into()
+        (self.when, self.kind.clone(), values)
     }
 }
