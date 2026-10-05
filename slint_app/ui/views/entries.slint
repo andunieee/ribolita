@@ -19,6 +19,7 @@ export component Entries inherits VerticalLayout {
     callback add_row();
     callback remove_row(int);
     callback save();
+    callback delete();
 
     spacing: 14px;
     Card {
@@ -48,11 +49,11 @@ export component Entries inherits VerticalLayout {
                         VerticalLayout {
                             padding: 8px;
                             Text {
-                                text: "#" + entry.id + " · " + entry.kind;
+                                text: entry.kind;
                             }
 
                             Text {
-                                text: entry.when;
+                                text: entry.when + " · by " + entry.author;
                                 font-size: 11px;
                                 color: #5a554f;
                             }
@@ -89,6 +90,13 @@ export component Entries inherits VerticalLayout {
             }
             submit => {
                 root.save();
+            }
+        }
+
+        Button {
+            text: "Delete Entry";
+            clicked => {
+                root.delete();
             }
         }
     }

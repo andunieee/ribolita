@@ -37,7 +37,9 @@ export component AppWindow inherits Window {
 
     in property <string> data_dir;
     in property <string> node_id;
+    in property <string> program_id;
     in-out property <string> peer_connect_input;
+    in-out property <string> peer_token_input;
     in property <[string]> connected_peers;
 
     callback refresh_state();
@@ -51,6 +53,7 @@ export component AppWindow inherits Window {
     callback add_entry_row();
     callback remove_entry_row(int);
     callback save_entry();
+    callback delete_entry();
     callback connect_peer();
 
     Rectangle {
@@ -127,12 +130,15 @@ export component AppWindow inherits Window {
                         add_row => root.add_entry_row();
                         remove_row(i) => root.remove_entry_row(i);
                         save => root.save_entry();
+                        delete => root.delete_entry();
                     }
 
                     if (root.active_tab == 3): Config {
                         data_dir: root.data_dir;
                         node_id: root.node_id;
+                        program_id: root.program_id;
                         peer_connect_input <=> root.peer_connect_input;
+                        peer_token_input <=> root.peer_token_input;
                         connected_peers: root.connected_peers;
                         connect_peer => root.connect_peer();
                     }

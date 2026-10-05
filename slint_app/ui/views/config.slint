@@ -3,7 +3,9 @@ import { Card } from "../components/card.slint";
 
 export component Config inherits VerticalLayout {
     in property <string> node_id;
+    in property <string> program_id;
     in-out property <string> peer_connect_input;
+    in-out property <string> peer_token_input;
     in property <[string]> connected_peers;
     in property <string> data_dir;
     callback connect_peer();
@@ -35,9 +37,27 @@ export component Config inherits VerticalLayout {
     }
 
     Card {
+        title: "Program";
+        VerticalLayout {
+            spacing: 8px;
+            Text {
+                text: "Synced as \"" + root.program_id + "\". On a server, the program needs the same id.";
+                wrap: word-wrap;
+                font-size: 12px;
+                color: #5a554f;
+            }
+        }
+    }
+
+    Card {
         title: "Connect to Peer";
         VerticalLayout {
             spacing: 8px;
+            LineEdit {
+                text <=> root.peer_token_input;
+                placeholder-text: "Token (a server's api key for this program)";
+            }
+
             HorizontalLayout {
                 spacing: 10px;
                 LineEdit {

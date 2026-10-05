@@ -9,9 +9,9 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 anyhow = { workspace = true }
 dirs = "6.0.0"
-iroh = "0.98"
 ribolita = { path = "../core", default-features = false, features = ["backend-redb"] }
 ribolita_common = { path = "../common" }
+ribolita_node = { path = "../node" }
 rmpv = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
