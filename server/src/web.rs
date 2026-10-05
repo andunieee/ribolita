@@ -14,7 +14,7 @@ pub(crate) async fn index(
     AxumState(state): AxumState<Arc<AppState>>,
 ) -> Result<Html<String>, ApiError> {
     let programs = programs::list_programs(&state.data_dir)?;
-    let markup = render_index(&programs, None, None);
+    let markup = render_index(&state.node_id, &programs, None, None);
     Ok(Html(markup.into_string()))
 }
 
@@ -72,11 +72,12 @@ pub(crate) async fn upload(
         .insert(program_id.clone(), api_key.clone());
 
     let programs = programs::list_programs(&state.data_dir)?;
-    let markup = render_index(&programs, Some(&api_key), Some(&program_id));
+    let markup = render_index(&state.node_id, &programs, Some(&api_key), Some(&program_id));
     Ok(Html(markup.into_string()))
 }
 
 fn render_index(
+    node_id: &str,
     programs: &[ProgramSummary],
     api_key: Option<&str>,
     program_id: Option<&str>,
@@ -96,7 +97,8 @@ fn render_index(
                 main class="mx-auto max-w-5xl px-6 py-12" {
                     header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between" {
                         div {
-                            h1 class="text-3xl mb-8 font-semibold tracking-tight md:text-4xl" { "ribolita programs" }
+                            h1 class="text-3xl mb-2 font-semibold tracking-tight md:text-4xl" { "ribolita programs" }
+                            p class="mb-8 text-xs text-stone-500" { "sync node id: " code class="font-mono break-all" { (node_id) } }
                         }
                     }
                     div class="grid gap-6 md:grid-cols-2" {

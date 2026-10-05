@@ -9,6 +9,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 mod api;
 mod errors;
 mod programs;
+mod sync;
 mod web;
 
 const MAX_WASM_SIZE: usize = 64 * 1024 * 1024;
@@ -45,15 +46,24 @@ async fn main() -> anyhow::Result<()> {
 
     let api_keys = programs::load_api_keys(&settings.data_dir)?;
 
+    let secret = ribolita_node::net::load_or_create_secret(&settings.data_dir)?;
     let app_state = Arc::new(api::AppState {
         data_dir: settings.data_dir,
         api_keys: tokio::sync::RwLock::new(api_keys),
+        author: ribolita_node::net::author_of(&secret),
         envs: Default::default(),
+        node_id: secret.public().to_string(),
+        node: Default::default(),
     });
+    println!("iroh node id: {}", app_state.node_id);
+    sync::spawn(app_state.clone(), secret);
 
     let app = Router::new()
         .route("/", get(web::index))
-        .route("/upload", post(web::upload).layer(DefaultBodyLimit::max(MAX_WASM_SIZE)))
+        .route(
+            "/upload",
+            post(web::upload).layer(DefaultBodyLimit::max(MAX_WASM_SIZE)),
+        )
         .route(
             "/api/:program_id/program",
             put(api::update_program).layer(DefaultBodyLimit::max(MAX_WASM_SIZE)),

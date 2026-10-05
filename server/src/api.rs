@@ -5,34 +5,44 @@ use axum::{
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, header::AUTHORIZATION},
 };
-use ribolita::{
-    EntriesMdbxDatabase, EntriesStore, Query as EntriesQuery, RunEnvironment, RunError,
-    StateLMDBDatabase,
-};
+use ribolita::{MdbxStore, Query as EntriesQuery, RunEnvironment, RunError};
 use ribolita_common::{
-    entry::{Entry, EntryOutput, entry_to_json},
+    entry::{Author, EntryId, EntryOutput, entry_to_json},
     rmp_json,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tokio::sync::RwLock;
 
-type Env = RunEnvironment<StateLMDBDatabase, EntriesMdbxDatabase>;
+type Env = RunEnvironment<MdbxStore>;
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
     pub(crate) api_keys: RwLock<HashMap<String, String>>,
+    /// entries created through the API are attributed to the server
+    pub(crate) author: Author,
     /// one open environment per program: databases can't be opened twice in a process, and
     /// entries of a program must be processed one at a time
     pub(crate) envs: Mutex<HashMap<String, Arc<Mutex<Env>>>>,
+    /// the server's iroh node id, which devices connect to
+    pub(crate) node_id: String,
+    pub(crate) node: OnceLock<tokio::sync::mpsc::UnboundedSender<ribolita_node::net::Cmd>>,
 }
 
 impl AppState {
-    fn env(&self, program_id: &str) -> Result<Arc<Mutex<Env>>, ApiError> {
+    /// Pushes a program's changes to the peers it's synced with.
+    fn sync(&self, program: &str) {
+        if let Some(node) = self.node.get() {
+            let program = Some(program.to_string());
+            node.send(ribolita_node::net::Cmd::Sync { program }).ok();
+        }
+    }
+
+    pub(crate) fn env(&self, program_id: &str) -> Result<Arc<Mutex<Env>>, ApiError> {
         let mut envs = self.envs.lock().unwrap();
         if let Some(env) = envs.get(program_id) {
             return Ok(env.clone());
@@ -40,7 +50,7 @@ impl AppState {
         let program = programs::load_program(&self.data_dir, program_id)?;
         let wasm = std::fs::read(&program.wasm_path)
             .map_err(|e| ApiError::internal(format!("failed to read wasm: {e}")))?;
-        let env = Env::new(&program.dir, &wasm).map_err(ApiError::internal_anyhow)?;
+        let env = Env::new(&program.dir, &wasm, self.author).map_err(ApiError::internal_anyhow)?;
         let env = Arc::new(Mutex::new(env));
         envs.insert(program_id.to_string(), env.clone());
         Ok(env)
@@ -65,18 +75,17 @@ async fn with_env<T: Send + 'static>(
 /// Failures caused by the program or the request are the client's problem, not the server's.
 fn run_error(err: RunError) -> ApiError {
     match err {
-        RunError::WasmCall(_)
-        | RunError::WasmtimeShenanigans(_)
-        | RunError::BadWasm(_)
-        | RunError::MissingExport(_)
-        | RunError::MissingMemory
-        | RunError::Replay(..) => ApiError::bad_request(err.to_string()),
+        RunError::Rejected(_) | RunError::Wasm(_) | RunError::BadWasm(_) => {
+            ApiError::bad_request(err.to_string())
+        }
+        RunError::NotFound(_) => ApiError::not_found(err.to_string()),
         _ => ApiError::internal(err.to_string()),
     }
 }
 
 #[derive(Deserialize)]
 pub struct EntryRequest {
+    /// when the event happened, in seconds since the unix epoch; defaults to now
     when: Option<u64>,
     kind: String,
     #[serde(default)]
@@ -85,7 +94,15 @@ pub struct EntryRequest {
 
 #[derive(Serialize)]
 pub struct EntryResponse {
-    id: u64,
+    id: String,
+    /// existing entries the program rejects after this one was inserted before them
+    rejected: Vec<RejectedEntry>,
+}
+
+#[derive(Serialize)]
+pub struct RejectedEntry {
+    id: String,
+    error: String,
 }
 
 #[derive(Serialize)]
@@ -101,27 +118,30 @@ pub(crate) async fn entry(
 ) -> Result<Json<EntryResponse>, ApiError> {
     authorize(&headers, &state, &program_id).await?;
 
-    let when = payload.when.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    });
     let values = payload
         .data
         .into_iter()
         .map(|(k, v)| (k, rmp_json::json_value_to_rmp_value(&v)))
         .collect();
 
-    let entry = Entry {
-        id: 0,
-        when,
-        kind: payload.kind,
-        values,
-    };
-
-    let id = with_env(state, program_id, move |env| env.run(entry).map_err(run_error)).await?;
-    Ok(Json(EntryResponse { id }))
+    let (entry, report) = with_env(state.clone(), program_id.clone(), move |env| {
+        env.add_with_report(payload.kind, values, payload.when)
+            .map_err(run_error)
+    })
+    .await?;
+    let rejected = report
+        .failed
+        .into_iter()
+        .map(|(id, error)| RejectedEntry {
+            id: id.to_string(),
+            error,
+        })
+        .collect();
+    state.sync(&program_id);
+    Ok(Json(EntryResponse {
+        id: entry.id.to_string(),
+        rejected,
+    }))
 }
 
 /// Replaces the program's wasm module (raw request body) and rebuilds its state from the log.
@@ -140,10 +160,21 @@ pub(crate) async fn update_program(
     let replayed = with_env(state, program_id, move |env| {
         env.set_module(&wasm).map_err(run_error)?;
         let replayed = match env.replay() {
-            Ok(count) => count,
-            Err(err) => {
+            Ok(report) if report.failed.is_empty() => report.applied,
+            result => {
+                // put the old module back and rebuild the state it produced
                 env.set_module(&old_wasm).map_err(run_error)?;
-                return Err(run_error(err));
+                env.replay().map_err(run_error)?;
+                return Err(match result {
+                    Ok(report) => {
+                        let (id, err) = &report.failed[0];
+                        ApiError::bad_request(format!(
+                            "new module rejects {} existing entries, e.g. {id}: {err}",
+                            report.failed.len()
+                        ))
+                    }
+                    Err(err) => run_error(err),
+                });
             }
         };
         programs::write_wasm(&program.dir, &wasm)?;
@@ -177,8 +208,9 @@ pub(crate) async fn state(
 
 #[derive(Deserialize)]
 pub struct EntriesQueryParams {
-    #[serde(default)]
-    id: Vec<u64>,
+    /// comma-separated entry ids
+    id: Option<String>,
+    /// seconds since the unix epoch
     since: Option<u64>,
     last: Option<usize>,
 }
@@ -191,10 +223,15 @@ pub(crate) async fn entries(
 ) -> Result<Json<Vec<EntryOutput>>, ApiError> {
     authorize(&headers, &state, &program_id).await?;
 
-    let query = if !query.id.is_empty() {
-        EntriesQuery::ByIds(query.id)
+    let query = if let Some(ids) = query.id {
+        let ids = ids
+            .split(',')
+            .map(|id| id.trim().parse::<EntryId>())
+            .collect::<Result<_, _>>()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        EntriesQuery::ByIds(ids)
     } else {
-        EntriesQuery::ByTimestamps {
+        EntriesQuery::ByTime {
             since: query.since,
             until: None,
             limit: query.last,
@@ -202,9 +239,7 @@ pub(crate) async fn entries(
     };
 
     let entries = with_env(state, program_id, move |env| {
-        env.entries()
-            .query(query)
-            .map_err(ApiError::internal_anyhow)
+        env.entries(query).map_err(run_error)
     })
     .await?;
     let output = entries.into_iter().map(entry_to_json).collect();
@@ -240,7 +275,7 @@ async fn get_or_load_api_key(state: &AppState, program_id: &str) -> Result<Strin
     Ok(api_key)
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
